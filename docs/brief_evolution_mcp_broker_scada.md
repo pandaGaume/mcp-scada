@@ -152,7 +152,26 @@ Ce choix n'affaiblit rien. La traduction n'a jamais été une frontière de séc
 
 Pour lire Modbus, `mcp-scada` est un **client** du slot `bench-motor01`. Il y est authentifié par la couche OAuth (`IPrincipal`, sujets dérivés du JWT), et non par son authentification provider (`IProviderPrincipal`). Ce sont deux systèmes distincts : « le principal du provider déclarant » n'a pas de sens côté client sans une correspondance explicite.
 
-Règle retenue : un client est admis sur un slot protégé si l'un de ses sujets (dérivés du JWT par `subjectMapping`) figure dans `IProviderPrincipal.subjects` du provider déclarant. Ces sujets sont écrits par les administrateurs du broker dans la configuration de l'authentification provider, et non par la déclaration : la déclaration n'attribue toujours aucun droit. Un provider loopback qui appelle par `tunnel.openInternalClient()` est admis directement.
+Règle retenue : un client est admis sur un slot protégé si l'un de ses sujets (dérivés du JWT par `subjectMapping`) figure dans `IProviderPrincipal.subjects` du provider déclarant. Ces sujets sont écrits par les administrateurs du broker dans la table `providers` du fichier de sécurité (voir ci-dessous), et non par la déclaration : la déclaration n'attribue toujours aucun droit. Un provider loopback qui appelle par `tunnel.openInternalClient()` est admis directement.
+
+Conséquence pratique : un slot protégé n'est joignable que si l'authentification OAuth des clients est active et que `subjectMapping` produit le sujet attendu. Sans elle, tout client est anonyme et refusé ; c'est voulu, l'échec est fermé.
+
+### Identités des providers
+
+Avant cette évolution, la CLI ne connaissait qu'un secret partagé (`providerSecret`) : tous les providers qui le présentaient recevaient la même identité, `"shared-secret"`, sans `subjects`. Impossible alors de distinguer `mcp-scada` du provider Modbus. Le fichier de sécurité porte donc une table, une entrée par provider :
+
+```json
+{
+  "providers": [
+    { "id": "mcp-scada", "secretEnv": "SCADA_PROVIDER_SECRET", "subjects": ["service:mcp-scada"], "allowedResources": ["/production/site1/**"] },
+    { "id": "modbus-bench", "secretEnv": "MODBUS_PROVIDER_SECRET", "allowedResources": ["/production/site1/bench/**"] }
+  ]
+}
+```
+
+- Chaque provider présente son propre secret (`X-Provider-Token` ou `Authorization: Bearer`) ; le fichier ne contient que le nom de la variable d'environnement qui le porte.
+- `providerSecret` reste accepté à côté, pour la compatibilité, et donne toujours le principal `"shared-secret"`. Ce principal ne peut pas déclarer : il n'identifie personne en particulier.
+- Côté bibliothèque : `WsTunnelBuilder.withProviderPrincipals()` (`ProviderTableAuthenticator`). Un provider loopback reçoit son principal par `registerLoopbackProvider(name, transport, { principal })`.
 
 Un provider déclarant dont `subjects` est vide ne peut protéger aucun slot : la déclaration est refusée avec une erreur qui le dit, plutôt que de fermer le slot à tout le monde, `mcp-scada` compris.
 
@@ -188,9 +207,9 @@ La sécurité passe donc dans un fichier dédié, par exemple `.mcp-broker/secur
 
 | `config.json` (topologie) | fichier de sécurité |
 |---|---|
-| port, hôte, origines, montages statiques | `authorization` : rôles, assignations, denies, `protectedSlots` |
-| `stdioUpstreams[]`, `mcpServers[]`, `mcpbBundles[]` | principals provider : `id`, `subjects`, `allowedResources` |
-| limites, délais, `providerTakeover` | paramètres OAuth du serveur de ressources |
+| port, hôte, origines, montages statiques | `auth` : paramètres OAuth, rôles, assignations, denies (le bloc actuel, sans `providerSecret`) |
+| `stdioUpstreams[]`, `mcpServers[]`, `mcpbBundles[]` | `providers` : `id`, `secretEnv`, `subjects`, `allowedResources` |
+| limites, délais, `providerTakeover` | `authorization.protectedSlots` |
 
 Règles :
 
@@ -198,14 +217,14 @@ Règles :
 - **Droits séparés.** Le fichier n'est lisible que par le compte du broker et modifiable par les seuls administrateurs sécurité : qui change la topologie ne change pas les droits.
 - **Version.** Le hash du fichier entre dans `policyVersion` (donc dans l'audit, E5) et figure dans `broker_info`.
 - **Pas de secret en clair.** `providerSecret` et les secrets du même genre sont lus depuis une variable d'environnement ou un fichier de secrets ; le fichier de sécurité ne contient que leur référence.
-- **Signature optionnelle.** Le fichier peut être accompagné d'une signature détachée (`security.json.sig`), vérifiée avec une clé publique de confiance, par le mécanisme déjà en place pour `mcpbBundles[]`. Quand une clé est configurée, une signature absente ou invalide empêche le démarrage.
-- **Compatibilité.** Les sections `auth` et `authorization` de `config.json` restent lues, avec un avertissement d'obsolescence. Si elles coexistent avec un fichier de sécurité, le broker refuse de démarrer plutôt que de choisir entre les deux en silence. `protectedSlots` n'est accepté **que** dans le fichier de sécurité.
+- **Signature optionnelle (lot 3).** Le fichier pourra être accompagné d'une signature détachée (`security.json.sig`), vérifiée avec une clé publique de confiance, par le mécanisme déjà en place pour `mcpbBundles[]`. Quand une clé est configurée, une signature absente ou invalide empêchera le démarrage. Reportée au lot 3 : elle ne change pas le format du fichier.
+- **Compatibilité.** La section `auth` de `config.json` reste lue tant qu'il n'y a pas de fichier de sécurité. Si elle coexiste avec un fichier de sécurité, le broker refuse de démarrer plutôt que de choisir entre les deux en silence. Les clés `providers` et `authorization` sont refusées dans `config.json`, avec ou sans fichier de sécurité : laissées là, elles seraient ignorées, et une protection écrite par l'exploitant n'existerait pas.
 
 Les assignations qui donnent ces capabilities aux opérateurs restent dans le fichier de sécurité du broker (voir « Fichier de sécurité séparé »), écrites par ses administrateurs :
 
 ```json
 {
-  "authorization": {
+  "auth": {
     "roles": {
       "scada-observer": { "capabilities": ["scada.observe"] },
       "scada-operator": { "inherits": ["scada-observer"], "capabilities": ["scada.acquire", "scada.control"] }
@@ -239,7 +258,7 @@ Vers un provider qui a une déclaration acceptée, le broker ajoute à chaque re
 ```
 
 - La référence n'a de sens que pour le broker. `mcp-scada` la renvoie telle quelle dans `broker/authorize`, sous la forme `principal: { "type": "caller-ref", "ref": ... }`, et le broker y retrouve les sujets qu'il a lui-même dérivés du JWT. `mcp-scada` ne peut donc ni inventer ni modifier une identité.
-- Elle est liée au slot et à la requête en cours. Elle expire à la réponse du provider, avec un court délai de grâce. Elle ne permet pas de demander une décision au nom d'un utilisateur absent.
+- Elle est liée au slot et à la requête en cours. Elle expire à la réponse du provider, sans délai de grâce : les trames d'un même socket arrivent dans l'ordre, donc le provider pose toujours sa question avant de répondre. Elle ne permet pas de demander une décision au nom d'un utilisateur absent.
 - Le broker **supprime** toute clé `io.cyanmycelium/caller` présente dans une requête client, sur tous les slots, avant toute évaluation.
 - Ni le token ni les claims ne sont transmis.
 - Seules les requêtes (trames avec `id`) portent une référence. Une notification client n'en porte pas.
@@ -254,24 +273,30 @@ L'agrégat n'atteint pas un provider avec l'identité du client réel : `Aggrega
 
 ### Corrélation
 
-`correlationId` reprend l'en-tête `X-Correlation-Id` pour un client Streamable HTTP ou SSE qui l'envoie. Pour un client WebSocket, stdio ou interne, qui n'a pas d'en-tête par requête, le broker le génère.
+En 1.5.0, le broker génère `correlationId` pour chaque requête. La reprise de l'en-tête `X-Correlation-Id` d'un client Streamable HTTP ou SSE est reportée au lot 3, avec l'audit unique (E5) : c'est là qu'elle sert.
 
 ### Évolution de mcp-core
 
-Ajouter un contexte de requête optionnel, sans casser les adapters existants :
+Livrée dans mcp-core 1.4.0. Un contexte de requête optionnel, en dernier paramètre, sans casser les adapters existants :
 
 ```ts
 export interface IMcpRequestContext {
+    readonly requestId: string | number;
+    readonly method: string;
     readonly meta?: Readonly<Record<string, unknown>>;
-    readonly signal?: AbortSignal;
 }
 
-executeToolAsync(uri: string, toolName: string, args: Record<string, unknown>, context?: IMcpRequestContext): Promise<McpToolResult>;
+readResourceAsync(uri: string, request?: IMcpRequestContext): Promise<McpResourceContent | undefined>;
+executeToolAsync(uri: string, toolName: string, args: Record<string, unknown>, request?: IMcpRequestContext): Promise<McpToolResult>;
+getPromptAsync?(name: string, args: Record<string, string>, request?: IMcpRequestContext): Promise<McpPromptResult | undefined>;
+completeAsync?(ref, argument, context?, request?: IMcpRequestContext): Promise<McpCompletion | undefined>;
 ```
 
-`McpServer._callTool()` transmet `params._meta`. Un adapter écrit sans le quatrième paramètre continue de compiler et de fonctionner.
-
-Le même paramètre optionnel `context` est ajouté aux méthodes de l'adapter qui servent les ressources (lecture, liste, abonnement) et les prompts. Un `browse` ou une lecture SCADA exposés comme ressources ont besoin de la référence d'appelant autant qu'un outil.
+- Le paramètre s'appelle `request` et non `context` : `completeAsync` avait déjà un `context`, le contexte de complétion MCP.
+- `meta` est `params._meta`, copié et gelé ; absent quand la requête n'en porte pas ou quand ce n'est pas un objet.
+- Pas de `signal` : le serveur ne gère pas l'annulation (`notifications/cancelled`), et un signal qui ne se déclenche jamais induirait en erreur. Ce sera un changement à part si le besoin apparaît.
+- La ressource racine d'un `McpBehavior` est mise en cache et partagée entre appelants : elle est construite sans contexte. Un contenu qui dépend de l'appelant passe par une URI d'instance.
+- Un adapter écrit pour 1.3.0, sans ce paramètre, fonctionne sans modification.
 
 ## E3. API de décision `broker/authorize`
 
@@ -312,6 +337,7 @@ Le provider pose une ou plusieurs questions en une seule requête :
       {
         "decisionId": "dec_91c2",
         "effect": "allow-with-constraints",
+        "allowed": false,
         "reason": "role-grant",
         "policies": ["line1-operators"],
         "obligations": {
@@ -358,9 +384,11 @@ await broker.authorize({
 - Les attributs sont transmis à l'audit. Ils ne sont évalués que si E6 est retenue.
 - L'audit distingue les deux formes : une décision `provider` est enregistrée au nom du principal du provider, jamais au nom d'un utilisateur.
 - Le broker audite chaque décision et renvoie un `decisionId` que l'exécution référence ensuite (E5).
-- Les questions d'un `browse` sont groupées. Une limite de taille de lot, configurable, protège le broker.
+- Les questions d'un `browse` sont groupées. Une limite de taille de lot (256 par défaut, `withAuthorizeBatchLimit()`) protège le broker.
 
-Pour un provider loopback, la même API est exposée en processus par l'objet renvoyé par `tunnel.registerLoopbackProvider()`. Côté `@cyanmycelium/mcp-broker-provider`, `DirectTransport` et `MultiplexTransport` exposent `broker.declare()`, `broker.authorize()` et `broker.reportResult()`.
+En 1.5.0, avant le lot 4, `effect` ne vaut que `allow` ou `deny`, et `obligations` est absent. Chaque décision porte aussi `allowed`. Les raisons propres à cette API sont `undeclared-resource`, `undeclared-capability` et `no-policy` (le broker n'a pas de moteur de policy, il n'accorde donc rien). Une requête mal formée, une forme de `principal` refusée ou une référence qui n'est plus valide sur ce socket reçoivent `-32602` en entier ; un provider sans déclaration acceptée reçoit `-32003`.
+
+Pour un provider loopback, la même API est exposée en processus par l'objet renvoyé par `tunnel.registerLoopbackProvider()` (`declare()`, `authorize()`). Côté `@cyanmycelium/mcp-broker-provider` 0.3.0, `DirectTransport` et `MultiplexTransport` exposent `transport.broker.declare()` et `transport.broker.authorize()` ; `broker.reportResult()` viendra avec le lot 3. Le client n'a pas de délai d'attente par défaut (`brokerRequestTimeoutMs` pour un broker antérieur à 1.4.1), et `callerReferenceOf(request?.meta)` lit la référence d'appelant.
 
 ## E4. Décisions avec obligations
 
@@ -443,7 +471,7 @@ Les fonctions `makeAuthorizationAuditEvent` et `writeAuthorizationAuditEvent` so
 ```
 
 - Le broker relie ce résultat à sa décision. Une décision d'écriture ou d'appel restée sans résultat au-delà d'un délai configurable est signalée par `broker_diagnose`.
-- `correlationId` suit la règle de E2 : repris de `X-Correlation-Id` pour un client HTTP qui l'envoie, généré par le broker sinon.
+- `correlationId` est repris de `X-Correlation-Id` pour un client HTTP qui l'envoie, généré par le broker sinon (en 1.5.0, toujours généré ; voir E2).
 - Un puits d'audit configurable : `WsTunnelBuilder.withAuthorizationAuditSink(sink)`, avec stderr par défaut.
 
 `mcp-scada` n'écrit plus d'audit à lui. Il n'y a qu'une autorité d'audit, comme le demande le §4 du brief SCADA.
@@ -493,9 +521,8 @@ Le contrat SCADA v1 vu des clients ne change pas.
 | Lot | Contenu | Version visée |
 |---|---|---|
 | 0 | Refus immédiat `-32601` d'une requête provider sans destinataire ; refus de démarrer quand le fichier de configuration désigné ne se lit pas (au lieu de repartir sur `{}`) | broker 1.4.1 |
-| 1 | Espace réservé `broker/*` avec refus immédiat, E2 (référence d'appelant ancrée sur `brokerId`, injection par `AggregateServer`, suppression anti-usurpation), `IMcpRequestContext` sur outils, ressources et prompts | broker 1.5.0, mcp-core 1.4.0 |
-| 2 | E1 (déclaration, double identifiant `resource` / `resourcePath`, fichier de sécurité séparé, `protectedSlots` fermés dès le démarrage, protection côté publication et prise de place) et E3 (`broker/authorize`) ; client côté provider | broker 1.5.0, provider 0.3.0 |
-| 3 | E5 (audit unique, `broker/audit/result`, puits configurable) | broker 1.5.0 |
+| 1 + 2 | Livrés ensemble. Espace réservé `broker/*` avec refus immédiat ; E2 (référence d'appelant ancrée sur `brokerId`, injection par `AggregateServer`, suppression anti-usurpation) ; `IMcpRequestContext` sur outils, ressources et prompts ; E1 (déclaration, double identifiant `resource` / `resourcePath`, table `providers`, fichier de sécurité séparé, `protectedSlots` fermés dès le démarrage, protection côté publication et prise de place) ; E3 (`broker/authorize`) ; client côté provider | mcp-core 1.4.0 (publié), broker 1.5.0, provider 0.3.0 |
+| 3 | E5 (audit unique, `broker/audit/result`, puits configurable, reprise de `X-Correlation-Id`) ; signature du fichier de sécurité | broker 1.5.x |
 | 4 | E4 (obligations sur les assignations, limites intersectées) | broker 1.6.0 |
 | 5 | E6, si un besoin est établi | à décider |
 
