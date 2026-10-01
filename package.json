@@ -1,0 +1,32 @@
+{
+    "name": "@cyanmycelium/mcp-scada",
+    "version": "0.1.0",
+    "description": "SCADA v1 contract above the industrial MCP slots of an mcp-broker: UNS identities, provider capabilities, destination and consistency, broker policy enforcement and end-to-end audit.",
+    "type": "module",
+    "license": "Apache-2.0",
+    "private": true,
+    "engines": {
+        "node": ">=20.11.0"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "scripts": {
+        "build": "tsup",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "vitest run",
+        "test:live": "vitest run --config vitest.live.config.ts",
+        "format": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
+        "format:fix": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\""
+    },
+    "dependencies": {
+        "@cyanmycelium/mcp-broker": "1.4.0",
+        "@cyanmycelium/mcp-core": "1.3.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "prettier": "^3.2.0",
+        "tsup": "^8.5.1",
+        "typescript": "^5.4.0",
+        "vitest": "^1.6.0"
+    }
+}

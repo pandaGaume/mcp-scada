@@ -1,0 +1,21 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 15020,
+    "log_level": "WARNING"
+  },
+  "data": {
+    "coils": [
+      { "address": 0, "values": [true, false] }
+    ],
+    "discrete_inputs": [
+      { "address": 0, "values": [false, true] }
+    ],
+    "holding_registers": [
+      { "address": 0, "values": [1450, 2400] }
+    ],
+    "input_registers": [
+      { "address": 0, "values": [16968, 0, 523] }
+    ]
+  }
+}

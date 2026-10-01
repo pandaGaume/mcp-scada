@@ -1,0 +1,82 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "modbus-device-map",
+  "endpoint": {
+    "id": 1,
+    "key": "bench_tcp",
+    "transport": "tcp",
+    "host": "127.0.0.1",
+    "port": 15020,
+    "enabled": true
+  },
+  "device": {
+    "id": 1,
+    "key": "motor01",
+    "endpoint_id": 1,
+    "unit_id": 1,
+    "profile_id": "bench_motor",
+    "enabled": true
+  },
+  "profile": {
+    "id": "bench_motor",
+    "name": "Test bench motor",
+    "addressing": "zero_based_pdu_offset",
+    "bindings": [
+      {
+        "id": 1,
+        "key": "speed",
+        "symbol": "SPEED",
+        "description": "Measured motor speed",
+        "area": "holding_registers",
+        "read_function_code": 3,
+        "offset": 0,
+        "quantity": 1,
+        "readable": true,
+        "writable": false,
+        "codec": { "id": "unsigned_16", "byte_order": "big_endian" },
+        "unit": "rpm"
+      },
+      {
+        "id": 2,
+        "key": "speed_setpoint",
+        "symbol": "SPEEDSP",
+        "description": "Motor speed setpoint",
+        "area": "holding_registers",
+        "read_function_code": 3,
+        "offset": 1,
+        "quantity": 1,
+        "readable": true,
+        "writable": false,
+        "codec": { "id": "unsigned_16", "byte_order": "big_endian" },
+        "unit": "rpm"
+      },
+      {
+        "id": 3,
+        "key": "temperature",
+        "symbol": "TEMP",
+        "description": "Winding temperature in tenths of a degree",
+        "area": "input_registers",
+        "read_function_code": 4,
+        "offset": 2,
+        "quantity": 1,
+        "readable": true,
+        "writable": false,
+        "codec": { "id": "signed_16", "byte_order": "big_endian" },
+        "unit": "dC"
+      },
+      {
+        "id": 4,
+        "key": "running",
+        "symbol": "RUN",
+        "description": "Motor running status",
+        "area": "coils",
+        "read_function_code": 1,
+        "offset": 0,
+        "quantity": 1,
+        "readable": true,
+        "writable": false,
+        "codec": { "id": "boolean_coil" }
+      }
+    ]
+  }
+}
