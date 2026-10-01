@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/mcp-scada-logo.png" alt="mcp-scada pixel art logo: a supervision screen with a panda, linked to a Modbus device and an OPC UA server" width="320">
+</p>
+
 # mcp-scada
 
 SCADA v1 above the industrial MCP slots of an [mcp-broker](../mcp-broker): one contract for `browse`, `read`, `write` and `invoke`, whatever protocol a slot speaks (Modbus today, OPC UA next).
