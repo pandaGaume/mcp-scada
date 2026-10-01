@@ -220,6 +220,7 @@ export type ScadaErrorCode =
     | "unknown_resource"
     | "invalid_request"
     | "policy_denied"
+    | "authorization_unavailable"
     | "approval_required"
     | "constraint_violation"
     | "rate_limited"

@@ -58,8 +58,18 @@ export class CountingSlotClient implements ISlotClient {
     }
 }
 
-export function slotClient(slot: string): McpClient {
-    return new McpClient({ name: "mcp-scada-bench", version: "0.1.0" }, new StreamableHttpTransport(`http://127.0.0.1:${BROKER_PORT}/${encodeURIComponent(slot)}/mcp`), 5_000);
+export function slotClient(slot: string, options: { port?: number; headers?: Record<string, string> } = {}): McpClient {
+    const url = `http://127.0.0.1:${options.port ?? BROKER_PORT}/${encodeURIComponent(slot)}/mcp`;
+    return new McpClient({ name: "mcp-scada-bench", version: "0.1.0" }, new StreamableHttpTransport(url, options.headers ? { headers: options.headers } : {}), 5_000);
+}
+
+export interface IModbusBenchOptions {
+    /** Port of the broker the provider publishes to. */
+    readonly brokerPort?: number;
+    /** Start an anonymous embedded broker on that port; false when the test brings its own. */
+    readonly embeddedBroker?: boolean;
+    /** Provider secret, sent by the C++ provider as `X-Provider-Token`. */
+    readonly providerToken?: string;
 }
 
 /**
@@ -68,14 +78,21 @@ export function slotClient(slot: string): McpClient {
  * the motor into a broker slot.
  */
 export class ModbusBench {
-    tunnel!: WsTunnel;
+    tunnel?: WsTunnel;
+    readonly port: number;
     private _simulator?: ChildProcess;
     private _provider?: ChildProcess;
 
+    constructor(private readonly _options: IModbusBenchOptions = {}) {
+        this.port = _options.brokerPort ?? BROKER_PORT;
+    }
+
     async start(): Promise<void> {
         this.startSimulator();
-        this.tunnel = new WsTunnelBuilder().withHost("127.0.0.1").withPort(BROKER_PORT).build();
-        await this.tunnel.start();
+        if (this._options.embeddedBroker !== false) {
+            this.tunnel = new WsTunnelBuilder().withHost("127.0.0.1").withPort(this.port).build();
+            await this.tunnel.start();
+        }
         this.startProvider();
     }
 
@@ -91,7 +108,17 @@ export class ModbusBench {
     startProvider(): void {
         this._provider = spawn(
             providerExe,
-            ["--broker-host", "127.0.0.1", "--broker-port", String(BROKER_PORT), "--slot", MODBUS_SLOT, "--config", path.join(repoRoot, "test-bench", "motor01.profile.json")],
+            [
+                "--broker-host",
+                "127.0.0.1",
+                "--broker-port",
+                String(this.port),
+                "--slot",
+                MODBUS_SLOT,
+                "--config",
+                path.join(repoRoot, "test-bench", "motor01.profile.json"),
+                ...(this._options.providerToken ? ["--token", this._options.providerToken] : []),
+            ],
             { stdio: "ignore" }
         );
     }

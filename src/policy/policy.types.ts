@@ -1,13 +1,23 @@
+import type { BrokerPrincipal } from "../broker/broker.protocol";
 import type { ConsistencyMode, Destination, Operation, OperationClass, ResourceEffect, UnsId } from "../contract/scada.types";
 
 /**
- * Who is calling, as canonical MCP Broker subjects (`user:alice`,
- * `group:maintenance-area-a`, `client:assistant`, `service:mcp-scada`).
- * Subjects come from a validated identity, never from request arguments.
+ * Who an operation is for.
+ *
+ * With the broker as the only decision point, mcp-scada never knows the
+ * caller's identity: it holds `principal`, the handle the broker gave it, and
+ * hands it back with each question. `id` is a label for logs only.
+ *
+ * `subjects` serves the local `BrokerPolicyGate` only, the interim mode used
+ * until the broker exposes `broker/authorize`. The broker decision client
+ * never reads it and never sends it.
  */
 export interface IScadaActor {
     readonly id: string;
     readonly subjects: readonly string[];
+    readonly principal?: BrokerPrincipal;
+    /** Correlation id the broker assigned to the request, when there is one. */
+    readonly correlationId?: string;
 }
 
 /**
@@ -33,7 +43,7 @@ export interface IScadaPolicyContext {
 export interface IScadaConstraints {
     readonly minValue?: number;
     readonly maxValue?: number;
-    readonly allowedValues?: readonly unknown[];
+    readonly allowedValues?: readonly (string | number | boolean | null)[];
     readonly destinations?: readonly Destination[];
     /** ISO timestamp after which the decision no longer holds. */
     readonly notAfter?: string;
@@ -48,6 +58,8 @@ export interface IScadaDecision {
     /** Broker policy ids that produced the decision. */
     readonly policies?: readonly string[];
     readonly constraints?: IScadaConstraints;
+    /** Broker audit id of this decision; execution results are reported against it. */
+    readonly decisionId?: string;
 }
 
 /**
@@ -56,4 +68,9 @@ export interface IScadaDecision {
  */
 export interface IScadaPolicyGate {
     evaluate(context: IScadaPolicyContext): IScadaDecision | Promise<IScadaDecision>;
+    /**
+     * Several questions at once, answered in order. A browse asks one per
+     * node; a remote decision point answers them in one round trip.
+     */
+    evaluateMany?(contexts: readonly IScadaPolicyContext[]): readonly IScadaDecision[] | Promise<readonly IScadaDecision[]>;
 }

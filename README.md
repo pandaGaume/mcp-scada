@@ -27,30 +27,56 @@ Read [docs/validation-architecture-v1.md](docs/validation-architecture-v1.md) fo
 
 ## Use
 
-```ts
-import { BrokerPolicyGate, ModbusScadaProvider, ScadaService, ScadaBehavior } from "@cyanmycelium/mcp-scada";
+mcp-scada configures the broker, the broker decides, mcp-scada applies: see [docs/brief_evolution_mcp_broker_scada.md](docs/brief_evolution_mcp_broker_scada.md). Two modes exist while the broker side ships.
 
-// The same `auth` section as the broker's config.json, with scada.* capabilities.
-const policy = BrokerPolicyGate.fromBrokerAuthConfig(brokerConfig.auth);
-const scada = new ScadaService({ policy, resources: { "uns://plant/line1/motor01/speed_sp": { constraints: { minValue: 0, maxValue: 1500 } } } });
+### Broker mode (target, needs broker 1.5.0)
+
+```ts
+import { BrokerAuditReporter, BrokerDecisionClient, ModbusScadaProvider, ScadaBehavior, ScadaService, brokerCallerResolver } from "@cyanmycelium/mcp-scada";
+
+// `broker` is the provider's side channel: broker.declare / authorize / reportResult (mcp-broker-provider 0.3.0).
+const policy = new BrokerDecisionClient(broker);
+const scada = new ScadaService({
+    policy,
+    audit: new BrokerAuditReporter(broker),
+    resources: { "uns://plant/line1/motor01/speed_sp": { effect: "physical-action", constraints: { minValue: 0, maxValue: 1500 } } },
+});
 
 await scada.registerProviderAsync(
     new ModbusScadaProvider({ id: "modbus-line1", client: modbusSlotClient, root: "uns://plant/line1", source: "device" }),
     "uns://plant/line1"
 );
 
-const { items } = await scada.readAsync(actor, { ids: ["uns://plant/line1/motor01/speed"], destination: "source" });
+// Descriptive only: namespace, capabilities, effects and limits, protected slots. No grant.
+await policy.declareAsync(scada.buildDeclaration({ version: "2026-10-01.1", namespace: "uns://plant", protects: ["modbus-line1"] }));
+
+const behavior = new ScadaBehavior(scada, brokerCallerResolver());
 ```
 
-Publish it as a slot with `new ScadaBehavior(scada, actorResolver)` on an `McpServerBuilder`. Tools: `scada.capabilities`, `scada.browse`, `scada.read`, `scada.write`, `scada.invoke`.
+- Every question goes to `broker/authorize` with the caller handle the broker wrote in `_meta["io.cyanmycelium/caller"]`; mcp-scada never sends an identity.
+- Until the declaration is accepted, or once it is refused, every operation fails with `authorization_unavailable`. A broker without `broker/*` answers `-32601` at once (1.4.1), which is a refusal. No timeout is involved unless `declareTimeoutMs` is set explicitly.
+- Execution results are reported with `broker/audit/result` against the broker's `decisionId`.
+- Reading `_meta` needs an mcp-core that passes the request context to the adapter (1.4.0).
+
+### Interim mode (broker 1.4.x)
+
+```ts
+const policy = BrokerPolicyGate.fromBrokerAuthConfig(brokerConfig.auth);
+const scada = new ScadaService({ policy });
+const behavior = new ScadaBehavior(scada, serviceActorResolver({ id: "mcp-scada", subjects: ["service:mcp-scada"] }));
+```
+
+`BrokerPolicyGate` compiles a copy of the broker's own policy engine and acts for one service actor. Bench or single-operator site only.
+
+Tools: `scada.capabilities`, `scada.browse`, `scada.read`, `scada.write`, `scada.invoke`.
 
 ### Policy mapping
 
-| SCADA | Broker `authorize()` |
+| SCADA | Broker |
 |---|---|
-| actor subjects | `subject.ids` |
+| caller handle (`_meta`) | `principal: { type: "caller-ref", ref }` |
 | operation class | capability `scada.observe`, `scada.acquire`, `scada.control`, `scada.execute` |
-| UNS `uns://a/b/c` | resource path `/a/b/c` |
+| UNS `uns://a/b/c` | `resource: "uns://a/b/c"`, `resourcePath: "/a/b/c"` |
 
 A read of the mcp-scada cache (`local`) is `observe`; any read that may go downstream is `acquire`.
 
@@ -60,7 +86,7 @@ A read of the mcp-scada cache (`local`) is `observe`; any read that may go downs
 npm test
 ```
 
-Conformance tests of the brief (section 13) against a simulated provider and the real broker policy engine.
+Conformance tests of the brief (section 13) against a simulated provider and the real broker policy engine, and the broker mode against `tests/fake.broker.ts`, a stand-in for the `broker/*` side of broker 1.5.0 written from the evolution brief.
 
 ```bash
 npm run test:live

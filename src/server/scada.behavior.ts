@@ -1,4 +1,5 @@
 import { McpAdapterBase, McpBehavior, McpToolResults, type McpResource, type McpResourceContent, type McpTool, type McpToolResult } from "@cyanmycelium/mcp-core";
+import { readCallerMeta } from "../broker/broker.protocol";
 import { ScadaError } from "../contract/scada.provider";
 import { DESTINATIONS, CONSISTENCY_MODES, type Destination, type DestinationRequest, type IConsistency, type IWriteItem } from "../contract/scada.types";
 import type { IScadaActor } from "../policy/policy.types";
@@ -6,15 +7,44 @@ import type { ScadaService } from "../scada.service";
 
 export const SCADA_CAPABILITIES_URI = "scada://capabilities";
 
+/** What the MCP server knows about the request, beyond its arguments (mcp-core `IMcpRequestContext`). */
+export interface IScadaRequestContext {
+    readonly meta?: Readonly<Record<string, unknown>>;
+    readonly signal?: AbortSignal;
+}
+
+/** Who one MCP request acts for. */
+export type ActorResolver = (args: Record<string, unknown>, context?: IScadaRequestContext) => IScadaActor;
+
 /**
- * Who the MCP session acts as.
+ * Broker mode: the actor is the caller handle the broker wrote in
+ * `_meta["io.cyanmycelium/caller"]`. Without it the actor has no principal,
+ * and the broker decision client denies every question: mcp-scada never
+ * substitutes an identity of its own.
  *
- * mcp-broker 1.4.0 authorizes the client frame, then forwards it to the slot
- * without the caller's principal. Until the broker propagates the verified
- * subjects, the SCADA slot acts as one configured service actor. See
- * docs/validation-architecture-v1.md, alignment point A1.
+ * Needs an mcp-core that passes `params._meta` to the adapter (1.4.0).
  */
-export type ActorResolver = (args: Record<string, unknown>) => IScadaActor;
+export function brokerCallerResolver(): ActorResolver {
+    return (_args, context) => {
+        const caller = readCallerMeta(context?.meta);
+        if (!caller) return { id: "anonymous", subjects: [] };
+        return {
+            id: `caller-ref:${caller.ref}`,
+            subjects: [],
+            principal: { type: "caller-ref", ref: caller.ref },
+            ...(caller.correlationId ? { correlationId: caller.correlationId } : {}),
+        };
+    };
+}
+
+/**
+ * Interim mode, until the broker exposes `broker/authorize`: every request
+ * acts as one configured service actor, evaluated by the local
+ * `BrokerPolicyGate`. Acceptable on a bench or a single-operator site only.
+ */
+export function serviceActorResolver(actor: IScadaActor): ActorResolver {
+    return () => actor;
+}
 
 const destinationSchema = {
     oneOf: [
@@ -36,9 +66,10 @@ class ScadaAdapter extends McpAdapterBase {
         return { uri, mimeType: "application/json", text: JSON.stringify({ providers: this._service.capabilities() }) };
     }
 
-    async executeToolAsync(_uri: string, toolName: string, args: Record<string, unknown>): Promise<McpToolResult> {
-        const actor = this._actor(args);
-        const correlationId = typeof args.correlationId === "string" && args.correlationId ? args.correlationId : undefined;
+    async executeToolAsync(_uri: string, toolName: string, args: Record<string, unknown>, context?: IScadaRequestContext): Promise<McpToolResult> {
+        const actor = this._actor(args, context);
+        // The broker's correlation id wins: it is the one in the broker audit.
+        const correlationId = actor.correlationId ?? (typeof args.correlationId === "string" && args.correlationId ? args.correlationId : undefined);
         try {
             switch (toolName) {
                 case "scada.capabilities":
@@ -71,8 +102,17 @@ class ScadaAdapter extends McpAdapterBase {
 
 /** MCP surface of mcp-scada: one tool per SCADA v1 operation. */
 export class ScadaBehavior extends McpBehavior {
+    private readonly _scada: ScadaAdapter;
+
     constructor(service: ScadaService, actor: ActorResolver) {
-        super(new ScadaAdapter(service, actor), { namespace: "scada" });
+        const adapter = new ScadaAdapter(service, actor);
+        super(adapter, { namespace: "scada" });
+        this._scada = adapter;
+    }
+
+    /** Forwards the request context that mcp-core's `McpBehavior` (1.3.0) does not pass on. */
+    public override executeToolAsync(uri: string, toolName: string, args: Record<string, unknown>, context?: IScadaRequestContext): Promise<McpToolResult> {
+        return this._scada.executeToolAsync(uri, toolName, args, context);
     }
 
     protected override _buildResources(): McpResource[] {

@@ -29,6 +29,8 @@ export interface IScadaAuditRecord {
     readonly result?: "success" | "failure" | "refused";
     readonly errorCode?: string;
     readonly nativeStatus?: string;
+    /** Broker audit id of the decision this record belongs to, when the broker decided. */
+    readonly decisionId?: string;
 }
 
 export interface IScadaAuditSink {

@@ -65,7 +65,7 @@ describe.skipIf(!benchAvailable)("SCADA v1 over the live mcp-modbus slot", () =>
             .register(new ScadaBehavior(service, () => operator))
             .build();
         await scadaServer.start();
-        bench.tunnel.registerLoopbackProvider("scada", clientEnd);
+        bench.tunnel!.registerLoopbackProvider("scada", clientEnd);
     });
 
     afterAll(async () => {

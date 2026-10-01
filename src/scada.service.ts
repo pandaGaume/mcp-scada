@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { IDeclareParams } from "./broker/broker.protocol";
+import { buildScadaDeclaration } from "./broker/declaration";
 import { redact, ConsoleAuditSink, type IScadaAuditRecord, type IScadaAuditSink } from "./audit/audit";
 import { LocalValueCache } from "./cache/value.cache";
 import { validateCapabilities } from "./contract/capabilities";
@@ -102,7 +104,7 @@ function mergeConstraints(...all: (IScadaConstraints | undefined)[]): IScadaCons
     const numbers = (values: (number | undefined)[]) => values.filter((v): v is number => typeof v === "number");
     const mins = numbers(present.map((c) => c.minValue));
     const maxs = numbers(present.map((c) => c.maxValue));
-    const lists = present.map((c) => c.allowedValues).filter((v): v is readonly unknown[] => Array.isArray(v));
+    const lists = present.map((c) => c.allowedValues).filter((v): v is NonNullable<IScadaConstraints["allowedValues"]> => Array.isArray(v));
     const destinationLists = present.map((c) => c.destinations).filter((v): v is readonly Destination[] => Array.isArray(v));
     const deadlines = present.map((c) => c.notAfter).filter((v): v is string => typeof v === "string");
     return {
@@ -172,6 +174,21 @@ export class ScadaService {
         this._registrations.delete(providerId);
     }
 
+    /**
+     * The `broker/authorization/declare` payload for this deployment: the
+     * namespace, the registered provider roots, and the approved effects and
+     * engineering limits. It grants nothing.
+     */
+    buildDeclaration(options: { version: string; namespace: UnsId; protects?: readonly string[] }): IDeclareParams {
+        return buildScadaDeclaration({
+            version: options.version,
+            namespace: options.namespace,
+            roots: [...this._registrations.values()].map((registration) => registration.root.id),
+            resources: this._resources,
+            protects: options.protects,
+        });
+    }
+
     capabilities(): IScadaCapabilities[] {
         return [...this._registrations.values()].map((registration) => registration.capabilities);
     }
@@ -180,7 +197,7 @@ export class ScadaService {
 
     /** Lists the nodes the actor may observe. Discoverability is not executability. */
     async browseAsync(actor: IScadaActor, root?: UnsId, context: IRequestContext = {}): Promise<IBrowseResult> {
-        const correlationId = context.correlationId ?? randomUUID();
+        const correlationId = context.correlationId ?? actor.correlationId ?? randomUUID();
         const rootPath = root !== undefined ? UnsPath.tryParse(root) : undefined;
         if (root !== undefined && !rootPath) throw new ScadaError("invalid_request", `invalid UNS id "${root}"`);
 
@@ -190,10 +207,17 @@ export class ScadaService {
             if (!registration.capabilities.capabilities.browse.supported) continue;
             const providerRoot = rootPath && registration.root.contains(rootPath) ? rootPath.id : undefined;
             const result = await registration.provider.browseAsync({ root: providerRoot }, context.signal);
-            for (const node of result.nodes) {
-                const decision = await this._decide(actor, "browse", node.id, registration, correlationId, {});
-                if (decision.decision === "allow" || decision.decision === "allow-with-constraints") nodes.push(node);
-            }
+            const decisions = await this._decideMany(
+                actor,
+                "browse",
+                registration,
+                correlationId,
+                result.nodes.map((node) => ({ resource: node.id }))
+            );
+            result.nodes.forEach((node, index) => {
+                const decision = decisions[index].decision;
+                if (decision === "allow" || decision === "allow-with-constraints") nodes.push(node);
+            });
         }
         return { nodes };
     }
@@ -201,7 +225,7 @@ export class ScadaService {
     // ── Read ────────────────────────────────────────────────────────────────
 
     async readAsync(actor: IScadaActor, request: IReadRequest, context: IRequestContext = {}): Promise<IReadResult> {
-        const correlationId = context.correlationId ?? randomUUID();
+        const correlationId = context.correlationId ?? actor.correlationId ?? randomUUID();
         if (!Array.isArray(request?.ids) || request.ids.length === 0) throw new ScadaError("invalid_request", "ids must be a non-empty array");
         if (request.destination === undefined) {
             throw new ScadaError("invalid_request", "destination is required: a read without destination is ambiguous", {
@@ -294,59 +318,79 @@ export class ScadaService {
             }
 
             const allowed: UnsPath[] = [];
-            for (const path of group) {
-                const decision = await this._decide(actor, "read", path.id, registration, correlationId, { destination, consistency: consistency.mode });
+            const decisionOf = new Map<UnsId, IScadaDecision>();
+            const decisions = await this._decideMany(
+                actor,
+                "read",
+                registration,
+                correlationId,
+                group.map((path) => ({ resource: path.id, destination, consistency: consistency.mode }))
+            );
+            for (const [index, path] of group.entries()) {
+                const decision = decisions[index];
                 const refusal = this._refusal(decision, destination);
                 if (refusal) {
                     fail(path.id, refusal.code, refusal.message, { auditId: decision.auditId, detail: refusal.detail });
                     continue;
                 }
                 allowed.push(path);
+                decisionOf.set(path.id, decision);
             }
             if (allowed.length === 0) continue;
 
-            if (destination === "local") {
+            const execute = async (): Promise<void> => {
+                if (destination === "local") {
+                    for (const path of allowed) {
+                        const hit = this.cache.get(path.id);
+                        if (!hit) fail(path.id, "cache_miss", `no value for ${path.id} in the local cache`);
+                        else if (consistency.mode === "max-age" && (hit.value.provenance.ageMs ?? Infinity) > consistency.maxAgeMs!) {
+                            fail(path.id, "cache_miss", `cached value is ${hit.value.provenance.ageMs} ms old, more than ${consistency.maxAgeMs} ms`);
+                        } else out.set(path.id, hit.value);
+                    }
+                    return;
+                }
+
+                const operationClass = classifyOperation("read", destination, consistency.mode);
+                const call = () => registration.provider.readAsync({ ids: allowed.map((p) => p.id), destination, consistency }, signal);
+                let items: readonly ScadaReadItem[];
+                try {
+                    const result = operationClass === "acquire" ? await registration.limiter.run(providerId, call) : await call();
+                    items = result.items;
+                } catch (error) {
+                    const body = ScadaError.toBody(error);
+                    for (const path of allowed) fail(path.id, body.code, body.message, body.detail ? { detail: body.detail } : {});
+                    return;
+                }
+
+                const byId = new Map(items.map((item) => [item.id, item]));
                 for (const path of allowed) {
-                    const hit = this.cache.get(path.id);
-                    if (!hit) fail(path.id, "cache_miss", `no value for ${path.id} in the local cache`);
-                    else if (consistency.mode === "max-age" && (hit.value.provenance.ageMs ?? Infinity) > consistency.maxAgeMs!) {
-                        fail(path.id, "cache_miss", `cached value is ${hit.value.provenance.ageMs} ms old, more than ${consistency.maxAgeMs} ms`);
-                    } else out.set(path.id, hit.value);
-                }
-                continue;
-            }
-
-            const operationClass = classifyOperation("read", destination, consistency.mode);
-            const call = () => registration.provider.readAsync({ ids: allowed.map((p) => p.id), destination, consistency }, signal);
-            let items: readonly ScadaReadItem[];
-            try {
-                const result = operationClass === "acquire" ? await registration.limiter.run(providerId, call) : await call();
-                items = result.items;
-            } catch (error) {
-                const body = ScadaError.toBody(error);
-                for (const path of allowed) fail(path.id, body.code, body.message, body.detail ? { detail: body.detail } : {});
-                continue;
-            }
-
-            const byId = new Map(items.map((item) => [item.id, item]));
-            for (const path of allowed) {
-                const item = byId.get(path.id);
-                if (!item) {
-                    fail(path.id, "native_protocol_error", `provider "${providerId}" returned no item for ${path.id}`);
-                    continue;
-                }
-                if (isItemError(item)) {
+                    const item = byId.get(path.id);
+                    if (!item) {
+                        fail(path.id, "native_protocol_error", `provider "${providerId}" returned no item for ${path.id}`);
+                        continue;
+                    }
+                    if (isItemError(item)) {
+                        out.set(path.id, item);
+                        continue;
+                    }
+                    const problem = this._checkProvenance(item, providerId, destination, consistency);
+                    if (problem) {
+                        fail(path.id, problem.code, problem.message);
+                        continue;
+                    }
+                    this.cache.store(item);
                     out.set(path.id, item);
-                    continue;
                 }
-                const problem = this._checkProvenance(item, providerId, destination, consistency);
-                if (problem) {
-                    fail(path.id, problem.code, problem.message);
-                    continue;
+            };
+            await execute();
+
+            // Every allowed read gets its outcome, success or not, against its decision.
+            if (this._auditReads) {
+                for (const path of allowed) {
+                    const item = out.get(path.id);
+                    const error = !item ? "native_protocol_error" : isItemError(item) ? item.error.code : undefined;
+                    this._writeResult(correlationId, actor, "read", path.id, registration, destination, undefined, error ? "failure" : "success", decisionOf.get(path.id), error);
                 }
-                this.cache.store(item);
-                out.set(path.id, item);
-                if (this._auditReads) this._writeResult(correlationId, actor, "read", path.id, registration, destination, undefined, "success");
             }
         }
         return out;
@@ -377,7 +421,7 @@ export class ScadaService {
     // ── Write ───────────────────────────────────────────────────────────────
 
     async writeAsync(actor: IScadaActor, request: IWriteRequest, context: IRequestContext = {}): Promise<IWriteResult> {
-        const correlationId = context.correlationId ?? randomUUID();
+        const correlationId = context.correlationId ?? actor.correlationId ?? randomUUID();
         if (!Array.isArray(request?.items) || request.items.length === 0) throw new ScadaError("invalid_request", "items must be a non-empty array");
         if (typeof request.destination !== "string") throw new ScadaError("invalid_request", "a write needs exactly one destination; writes never fall back");
         if (request.destination === "local") throw new ScadaError("unsupported_destination", "the local cache cannot be written");
@@ -388,6 +432,7 @@ export class ScadaService {
             outcomes.set(id, { id, status: "failure", error: { code, message, ...extra } });
 
         const ready = new Map<IRegistration, { item: IWriteItem; decision: IScadaDecision & { auditId: string } }[]>();
+        const eligible = new Map<IRegistration, { path: UnsPath; item: IWriteItem }[]>();
         for (const item of request.items) {
             const path = UnsPath.tryParse(item?.id);
             if (!path) {
@@ -410,17 +455,32 @@ export class ScadaService {
                 });
                 continue;
             }
-            const decision = await this._decide(actor, "write", path.id, registration, correlationId, { destination, requestedValue: item.value });
-            const refusal = this._refusal(decision, destination);
-            if (refusal) {
-                refuse(item.id, refusal.code, refusal.message, { auditId: decision.auditId, detail: refusal.detail });
-                this._writeResult(correlationId, actor, "write", path.id, registration, destination, item.value, "refused", decision, refusal.code);
-                continue;
+            const bucket = eligible.get(registration);
+            if (bucket) bucket.push({ path, item });
+            else eligible.set(registration, [{ path, item }]);
+        }
+
+        for (const [registration, entries] of eligible) {
+            const decisions = await this._decideMany(
+                actor,
+                "write",
+                registration,
+                correlationId,
+                entries.map(({ path, item }) => ({ resource: path.id, destination, requestedValue: item.value }))
+            );
+            for (const [index, { path, item }] of entries.entries()) {
+                const decision = decisions[index];
+                const refusal = this._refusal(decision, destination);
+                if (refusal) {
+                    refuse(item.id, refusal.code, refusal.message, { auditId: decision.auditId, detail: refusal.detail });
+                    this._writeResult(correlationId, actor, "write", path.id, registration, destination, item.value, "refused", decision, refusal.code);
+                    continue;
+                }
+                const bucket = ready.get(registration);
+                const entry = { item: { id: path.id, value: item.value }, decision };
+                if (bucket) bucket.push(entry);
+                else ready.set(registration, [entry]);
             }
-            const bucket = ready.get(registration);
-            const entry = { item: { id: path.id, value: item.value }, decision };
-            if (bucket) bucket.push(entry);
-            else ready.set(registration, [entry]);
         }
 
         for (const [registration, entries] of ready) {
@@ -475,7 +535,7 @@ export class ScadaService {
     // ── Invoke (phase 3: same gate, no value constraints yet) ───────────────
 
     async invokeAsync(actor: IScadaActor, id: UnsId, args: Readonly<Record<string, unknown>>, context: IRequestContext = {}): Promise<IInvokeResult> {
-        const correlationId = context.correlationId ?? randomUUID();
+        const correlationId = context.correlationId ?? actor.correlationId ?? randomUUID();
         const path = UnsPath.tryParse(id);
         if (!path) throw new ScadaError("invalid_request", `invalid UNS id "${id}"`);
         const registration = this._resolve(path);
@@ -483,7 +543,7 @@ export class ScadaService {
         if (!registration.capabilities.capabilities.invoke.supported) {
             throw new ScadaError("unsupported_capability", `provider "${registration.provider.id}" does not support invoke`, { detail: { capability: "invoke" } });
         }
-        const decision = await this._decide(actor, "invoke", path.id, registration, correlationId, { requestedValue: args });
+        const [decision] = await this._decideMany(actor, "invoke", registration, correlationId, [{ resource: path.id, requestedValue: args }]);
         const refusal = this._refusal(decision, undefined);
         if (refusal) {
             this._writeResult(correlationId, actor, "invoke", path.id, registration, undefined, args, "refused", decision, refusal.code);
@@ -509,63 +569,77 @@ export class ScadaService {
         return undefined;
     }
 
-    /** Asks the broker, and records the decision before anything executes. */
-    private async _decide(
+    /**
+     * Asks the broker, in one batch per provider, and records each decision
+     * before anything executes. Decisions come back in the order asked.
+     */
+    private async _decideMany(
         actor: IScadaActor,
         operation: Operation,
-        resource: UnsId,
         registration: IRegistration,
         correlationId: string,
-        extra: { destination?: Destination; consistency?: ConsistencyMode; requestedValue?: unknown }
-    ): Promise<IScadaDecision & { auditId: string }> {
-        const operationClass = classifyOperation(operation, extra.destination, extra.consistency);
-        const effect = this._resources[resource]?.effect ?? (operation === "write" || operation === "invoke" ? "physical-action" : "observation");
-        const context: IScadaPolicyContext = {
+        entries: readonly { resource: UnsId; destination?: Destination; consistency?: ConsistencyMode; requestedValue?: unknown }[]
+    ): Promise<(IScadaDecision & { auditId: string })[]> {
+        if (entries.length === 0) return [];
+        const contexts: IScadaPolicyContext[] = entries.map((entry) => ({
             actor,
             operation,
-            operationClass,
-            resource,
-            destination: extra.destination,
-            consistency: extra.consistency,
-            requestedValue: extra.requestedValue,
-            effect,
+            operationClass: classifyOperation(operation, entry.destination, entry.consistency),
+            resource: entry.resource,
+            destination: entry.destination,
+            consistency: entry.consistency,
+            requestedValue: entry.requestedValue,
+            effect: this._resources[entry.resource]?.effect ?? (operation === "write" || operation === "invoke" ? "physical-action" : "observation"),
             provider: registration.provider.id,
             plantContext: this._plantContext,
             requestContext: { correlationId },
-        };
-        let decision: IScadaDecision;
+        }));
+
+        let decisions: readonly IScadaDecision[];
         try {
-            decision = await this._policy.evaluate(context);
-        } catch {
-            decision = { decision: "deny", reason: "evaluation-error" };
+            decisions = this._policy.evaluateMany ? await this._policy.evaluateMany(contexts) : await Promise.all(contexts.map((context) => this._policy.evaluate(context)));
+            if (decisions.length !== contexts.length) throw new Error("the policy answered a different number of decisions");
+        } catch (error) {
+            // Nothing was decided: deny, and say why. An unreachable or
+            // undeclared broker is not a policy outcome.
+            const reason = error instanceof ScadaError && error.code === "authorization_unavailable" ? "authorization_unavailable" : "evaluation-error";
+            decisions = contexts.map(() => ({ decision: "deny" as const, reason }));
         }
-        const auditId = randomUUID();
+
         const mutation = operation === "write" || operation === "invoke";
-        if (mutation || decision.decision !== "allow" || this._auditReads) {
-            this._audit.write({
-                auditId,
-                correlationId,
-                phase: "decision",
-                timestamp: new Date().toISOString(),
-                actor: actor.id,
-                operation,
-                operationClass,
-                resource,
-                destination: extra.destination,
-                ...(extra.requestedValue !== undefined ? { requested: redact(extra.requestedValue) } : {}),
-                provider: registration.provider.id,
-                policies: decision.policies,
-                decision: decision.decision,
-                reason: decision.reason,
-                constraints: decision.constraints,
-            });
-        }
-        return { ...decision, auditId };
+        return contexts.map((context, index) => {
+            const decision = decisions[index];
+            const auditId = decision.decisionId ?? randomUUID();
+            if (mutation || decision.decision !== "allow" || this._auditReads) {
+                this._audit.write({
+                    auditId,
+                    correlationId,
+                    phase: "decision",
+                    timestamp: new Date().toISOString(),
+                    actor: actor.id,
+                    operation,
+                    operationClass: context.operationClass,
+                    resource: context.resource,
+                    destination: context.destination,
+                    ...(context.requestedValue !== undefined ? { requested: redact(context.requestedValue) } : {}),
+                    provider: registration.provider.id,
+                    policies: decision.policies,
+                    decision: decision.decision,
+                    reason: decision.reason,
+                    constraints: decision.constraints,
+                    ...(decision.decisionId ? { decisionId: decision.decisionId } : {}),
+                });
+            }
+            return { ...decision, auditId };
+        });
     }
 
     private _refusal(decision: IScadaDecision, destination: Destination | undefined): { code: ScadaErrorCode; message: string; detail?: Record<string, unknown> } | undefined {
         switch (decision.decision) {
             case "deny":
+                if (decision.reason === "authorization_unavailable") {
+                    return { code: "authorization_unavailable", message: "the MCP Broker has not accepted the SCADA declaration; no operation is served" };
+                }
                 return { code: "policy_denied", message: "denied by the MCP Broker policy", detail: { reason: decision.reason } };
             case "require-approval":
                 return { code: "approval_required", message: "the MCP Broker policy requires an approval for this operation", detail: { reason: decision.reason } };
@@ -640,6 +714,7 @@ export class ScadaService {
             reason: decision?.reason ?? "",
             constraints: decision?.constraints,
             result,
+            ...(decision?.decisionId ? { decisionId: decision.decisionId } : {}),
             ...(errorCode ? { errorCode } : {}),
             ...(nativeStatus ? { nativeStatus } : {}),
         });
