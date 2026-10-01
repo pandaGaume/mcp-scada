@@ -29,7 +29,7 @@ Read [docs/validation-architecture-v1.md](docs/validation-architecture-v1.md) fo
 
 mcp-scada configures the broker, the broker decides, mcp-scada applies: see [docs/brief_evolution_mcp_broker_scada.md](docs/brief_evolution_mcp_broker_scada.md). Two modes exist while the broker side ships.
 
-### Broker mode (target, needs broker 1.5.0)
+### Broker mode (broker 1.5.0 and later)
 
 ```ts
 import { BrokerAuditReporter, BrokerDecisionClient, ModbusScadaProvider, ScadaBehavior, ScadaService, brokerCallerResolver } from "@cyanmycelium/mcp-scada";
