@@ -1,13 +1,15 @@
 export * from "./contract/scada.types";
 export * from "./contract/scada.provider";
 export { validateCapabilities } from "./contract/capabilities";
-export { UnsPath } from "./uns/uns";
+// UNS ids are shared with mcp-history and mcp-cache: re-exported from @cyanmycelium/mcp-uns.
+export { UnsPath } from "@cyanmycelium/mcp-uns";
 export * from "./policy/policy.types";
 export { classifyOperation, capabilityOf } from "./policy/operation.class";
 export { BrokerPolicyGate } from "./policy/broker.policy.gate";
 export type { IBrokerPolicyGateOptions } from "./policy/broker.policy.gate";
 export * from "./audit/audit";
 export { LocalValueCache } from "./cache/value.cache";
+export type { ILocalValueCacheOptions } from "./cache/value.cache";
 export { AcquireLimiter } from "./limits/acquire.limiter";
 export type { IAcquireLimits } from "./limits/acquire.limiter";
 export { ScadaService } from "./scada.service";

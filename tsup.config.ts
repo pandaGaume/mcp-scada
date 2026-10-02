@@ -8,5 +8,5 @@ export default defineConfig({
     clean: true,
     target: "es2022",
     platform: "node",
-    external: ["@cyanmycelium/mcp-broker", "@cyanmycelium/mcp-core"],
+    external: ["@cyanmycelium/mcp-broker", "@cyanmycelium/mcp-cache", "@cyanmycelium/mcp-core", "@cyanmycelium/mcp-uns"],
 });

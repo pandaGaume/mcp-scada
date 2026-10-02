@@ -70,6 +70,22 @@ const behavior = new ScadaBehavior(scada, serviceActorResolver({ id: "mcp-scada"
 
 Tools: `scada.capabilities`, `scada.browse`, `scada.read`, `scada.write`, `scada.invoke`.
 
+### The `local` destination
+
+`local` serves the values mcp-scada already holds, filled only by reads that really went downstream; it never goes downstream itself. The values live in any [cache.v1](https://github.com/pandaGaume/mcp-cache) store, read in process. The default is this process's memory. A Redis store gives several mcp-scada instances one shared `local` view:
+
+```ts
+import { RedisCacheStore } from "@cyanmycelium/mcp-cache-redis";
+
+const scada = new ScadaService({
+    policy,
+    localCache: await RedisCacheStore.connectAsync("rediss://cache.example.com:6380", { password, prefix: "mcp-scada:local:" }),
+    localCacheTtlMs: 300_000, // a shared store keeps its keys otherwise
+});
+```
+
+A cache that cannot be read answers `cache_miss` (`detail.reason: "cache_unavailable"`), so an explicit fallback such as `["local", "source"]` goes on to the source. A cache that cannot store never fails the read that fed it. UNS ids come from [mcp-uns](https://github.com/pandaGaume/mcp-uns), shared with mcp-history and mcp-cache.
+
 ### Policy mapping
 
 | SCADA | Broker |

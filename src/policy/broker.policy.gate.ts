@@ -8,7 +8,7 @@ import {
     type IAuthorizationSubject,
     type IPolicyEngine,
 } from "@cyanmycelium/mcp-broker";
-import { UnsPath } from "../uns/uns";
+import { UnsPath } from "@cyanmycelium/mcp-uns";
 import { capabilityOf } from "./operation.class";
 import type { IScadaDecision, IScadaPolicyContext, IScadaPolicyGate } from "./policy.types";
 

@@ -1,6 +1,6 @@
 import type { IScadaConstraints } from "../policy/policy.types";
 import type { ResourceEffect, UnsId } from "../contract/scada.types";
-import { UnsPath } from "../uns/uns";
+import { UnsPath } from "@cyanmycelium/mcp-uns";
 import type { IDeclareParams, IDeclaredResource } from "./broker.protocol";
 
 export const SCADA_DOMAIN = "scada";
