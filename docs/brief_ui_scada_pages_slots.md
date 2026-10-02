@@ -1,7 +1,7 @@
 # Interface SCADA servie par le broker, et pages web comme slots
 
-Date : 1er octobre 2026
-Base : `@cyanmycelium/mcp-broker` 1.5.0 (sur `main`, non publié), `@cyanmycelium/mcp-broker-provider` 0.3.0 (idem), `@cyanmycelium/mcp-core` 1.4.0
+Date : 2 octobre 2026
+Base : `@cyanmycelium/mcp-broker` 1.6.0, `@cyanmycelium/mcp-broker-provider` 0.3.0, `@cyanmycelium/mcp-core` 1.4.0
 Origine : [évolution du broker pour SCADA v1](brief_evolution_mcp_broker_scada.md) (E1 à E5)
 
 ## Décision proposée
