@@ -13,7 +13,7 @@ import {
     type ScadaReadItem,
     type UnsId,
 } from "../../contract/scada.types";
-import { UnsPath } from "../../uns/uns";
+import { UnsPath } from "@cyanmycelium/mcp-uns";
 
 /** The part of an MCP client this provider uses; `McpClient` from mcp-core satisfies it. */
 export interface ISlotClient {

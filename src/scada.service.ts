@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IDeclareParams } from "./broker/broker.protocol";
 import { buildScadaDeclaration } from "./broker/declaration";
 import { redact, ConsoleAuditSink, type IScadaAuditRecord, type IScadaAuditSink } from "./audit/audit";
+import type { ICacheStore } from "@cyanmycelium/mcp-cache";
 import { LocalValueCache } from "./cache/value.cache";
 import { validateCapabilities } from "./contract/capabilities";
 import { ScadaError, type IScadaProvider } from "./contract/scada.provider";
@@ -30,7 +31,7 @@ import {
 import { AcquireLimiter, type IAcquireLimits } from "./limits/acquire.limiter";
 import { classifyOperation } from "./policy/operation.class";
 import type { IScadaActor, IScadaConstraints, IScadaDecision, IScadaPolicyContext, IScadaPolicyGate } from "./policy/policy.types";
-import { UnsPath } from "./uns/uns";
+import { UnsPath } from "@cyanmycelium/mcp-uns";
 
 /** Configuration approved for one resource by the SCADA owner. It can only narrow. */
 export interface IApprovedResourceConfig {
@@ -50,6 +51,14 @@ export interface IScadaServiceOptions {
     readonly resources?: Readonly<Record<UnsId, IApprovedResourceConfig>>;
     /** Operational context handed to the policy, e.g. `{ mode: "maintenance" }`. */
     readonly plantContext?: Readonly<Record<string, string>>;
+    /**
+     * The store behind the `local` destination: any cache.v1 store. Default:
+     * this process's memory. A `RedisCacheStore` shares one `local` view
+     * between mcp-scada instances.
+     */
+    readonly localCache?: ICacheStore;
+    /** Time to live of the `local` values. Set one with a shared store. */
+    readonly localCacheTtlMs?: number;
     readonly now?: () => number;
 }
 
@@ -143,7 +152,11 @@ export class ScadaService {
         this._acquireLimits = options.acquireLimits ?? {};
         this._resources = options.resources ?? {};
         this._plantContext = options.plantContext;
-        this.cache = new LocalValueCache(options.now);
+        this.cache = new LocalValueCache({
+            ...(options.localCache ? { store: options.localCache } : {}),
+            ...(options.localCacheTtlMs ? { ttlMs: options.localCacheTtlMs } : {}),
+            ...(options.now ? { now: options.now } : {}),
+        });
     }
 
     // ── Registration ────────────────────────────────────────────────────────
@@ -340,8 +353,17 @@ export class ScadaService {
 
             const execute = async (): Promise<void> => {
                 if (destination === "local") {
+                    let hits: Awaited<ReturnType<LocalValueCache["getAsync"]>>;
+                    try {
+                        hits = await this.cache.getAsync(allowed.map((path) => path.id));
+                    } catch (error) {
+                        // An unreachable cache is a miss: an explicit fallback list may go on to the next destination.
+                        const reason = error instanceof Error ? error.message : String(error);
+                        for (const path of allowed) fail(path.id, "cache_miss", `the local cache cannot be read: ${reason}`, { detail: { reason: "cache_unavailable" } });
+                        return;
+                    }
                     for (const path of allowed) {
-                        const hit = this.cache.get(path.id);
+                        const hit = hits.get(path.id);
                         if (!hit) fail(path.id, "cache_miss", `no value for ${path.id} in the local cache`);
                         else if (consistency.mode === "max-age" && (hit.value.provenance.ageMs ?? Infinity) > consistency.maxAgeMs!) {
                             fail(path.id, "cache_miss", `cached value is ${hit.value.provenance.ageMs} ms old, more than ${consistency.maxAgeMs} ms`);
@@ -363,6 +385,7 @@ export class ScadaService {
                 }
 
                 const byId = new Map(items.map((item) => [item.id, item]));
+                const fresh: IScadaValue[] = [];
                 for (const path of allowed) {
                     const item = byId.get(path.id);
                     if (!item) {
@@ -378,9 +401,10 @@ export class ScadaService {
                         fail(path.id, problem.code, problem.message);
                         continue;
                     }
-                    this.cache.store(item);
+                    fresh.push(item);
                     out.set(path.id, item);
                 }
+                await this.cache.storeAsync(fresh);
             };
             await execute();
 

@@ -3,7 +3,7 @@ import { ScadaError } from "../contract/scada.provider";
 import type { Destination } from "../contract/scada.types";
 import { capabilityOf } from "../policy/operation.class";
 import type { IScadaConstraints, IScadaDecision, IScadaPolicyContext, IScadaPolicyGate } from "../policy/policy.types";
-import { UnsPath } from "../uns/uns";
+import { UnsPath } from "@cyanmycelium/mcp-uns";
 import { BrokerRpcError, type IAuthorizeCheck, type IBrokerChannel, type IBrokerDecision, type IDeclareParams, type IDeclareResult } from "./broker.protocol";
 
 export interface IBrokerDecisionClientOptions {
