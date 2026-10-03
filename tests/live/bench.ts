@@ -48,7 +48,14 @@ export const benchTarget: IBenchTarget = resolveBenchTarget();
 function resolveBenchTarget(): IBenchTarget {
     const host = process.env.MODBUS_TEST_HOST;
     if (!host) {
-        return { external: false, profile: path.join(repoRoot, "test-bench", "motor01.profile.json"), device: "motor01", bindings: ["speed", "temperature", "running"] };
+        const motor = path.join(repoRoot, "test-bench", "motor01.profile.json");
+        const maxConnections = process.env.MODBUS_TEST_MAX_CONNECTIONS;
+        return {
+            external: false,
+            profile: maxConnections ? retarget(motor, undefined, undefined, maxConnections) : motor,
+            device: "motor01",
+            bindings: ["speed", "temperature", "running"],
+        };
     }
     const source = path.resolve(process.env.MODBUS_TEST_PROFILE ?? path.join(modbusRepo, "config", "profiles", "local-spoony-modbux.json"));
     const bindings = (process.env.MODBUS_TEST_BINDINGS ?? "line_frequency,voltage_l1,relay_a").split(",").map((key) => key.trim());
@@ -62,9 +69,9 @@ function resolveBenchTarget(): IBenchTarget {
 }
 
 /** A copy of the device map pointing at host:port, its profile_uri made absolute so the copy loads from anywhere. */
-function retarget(source: string, host: string, port: string | undefined, maxConnections: string | undefined): string {
+function retarget(source: string, host: string | undefined, port: string | undefined, maxConnections: string | undefined): string {
     const document = JSON.parse(readFileSync(source, "utf8"));
-    document.endpoint.host = host;
+    if (host) document.endpoint.host = host;
     if (port) document.endpoint.port = Number(port);
     if (maxConnections) document.endpoint.max_connections = Number(maxConnections);
     if (typeof document.profile_uri === "string") document.profile_uri = path.resolve(path.dirname(source), document.profile_uri).replace(/\\/g, "/");
