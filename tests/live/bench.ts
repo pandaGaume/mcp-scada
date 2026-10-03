@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WsTunnelBuilder, type WsTunnel } from "@cyanmycelium/mcp-broker";
@@ -20,8 +21,62 @@ export const python =
     (windows ? path.join(modbusRepo, "tools", "pymodbustcp", ".venv", "Scripts", "python.exe") : path.join(modbusRepo, "tools", "pymodbustcp", ".venv", "bin", "python"));
 const simulatorScript = path.join(modbusRepo, "tools", "pymodbustcp", "server.py");
 
-export const benchAvailable = existsSync(providerExe) && existsSync(python) && existsSync(simulatorScript);
-export const missingBench = [providerExe, python, simulatorScript].filter((file) => !existsSync(file));
+/** The Modbus server the bench reads, and the device and three bindings it reads there. */
+export interface IBenchTarget {
+    /** An external server (MODBUS_TEST_HOST is set): no simulator is started. */
+    readonly external: boolean;
+    /** Device map handed to the C++ provider. */
+    readonly profile: string;
+    readonly device: string;
+    readonly bindings: readonly [string, string, string];
+}
+
+/**
+ * By default the pyModbusTCP motor simulator started by the bench. With
+ * MODBUS_TEST_HOST set, an external server already running, for example
+ * modbux loaded with mcp-modbus/config/simulators/modbux-spoony.json:
+ *
+ *   MODBUS_TEST_HOST      server address
+ *   MODBUS_TEST_PORT      server port (default: the profile's)
+ *   MODBUS_TEST_MAX_CONNECTIONS  connections the provider may open to it, 1 to 4 (default: the profile's)
+ *   MODBUS_TEST_PROFILE   device map (default: mcp-modbus/config/profiles/local-spoony-modbux.json)
+ *   MODBUS_TEST_DEVICE    device key (default: spoony_local)
+ *   MODBUS_TEST_BINDINGS  three binding keys, comma separated (default: line_frequency,voltage_l1,relay_a)
+ */
+export const benchTarget: IBenchTarget = resolveBenchTarget();
+
+function resolveBenchTarget(): IBenchTarget {
+    const host = process.env.MODBUS_TEST_HOST;
+    if (!host) {
+        return { external: false, profile: path.join(repoRoot, "test-bench", "motor01.profile.json"), device: "motor01", bindings: ["speed", "temperature", "running"] };
+    }
+    const source = path.resolve(process.env.MODBUS_TEST_PROFILE ?? path.join(modbusRepo, "config", "profiles", "local-spoony-modbux.json"));
+    const bindings = (process.env.MODBUS_TEST_BINDINGS ?? "line_frequency,voltage_l1,relay_a").split(",").map((key) => key.trim());
+    if (bindings.length !== 3 || bindings.some((key) => !key)) throw new Error("MODBUS_TEST_BINDINGS must name three bindings");
+    return {
+        external: true,
+        profile: existsSync(source) ? retarget(source, host, process.env.MODBUS_TEST_PORT, process.env.MODBUS_TEST_MAX_CONNECTIONS) : source,
+        device: process.env.MODBUS_TEST_DEVICE ?? "spoony_local",
+        bindings: bindings as unknown as readonly [string, string, string],
+    };
+}
+
+/** A copy of the device map pointing at host:port, its profile_uri made absolute so the copy loads from anywhere. */
+function retarget(source: string, host: string, port: string | undefined, maxConnections: string | undefined): string {
+    const document = JSON.parse(readFileSync(source, "utf8"));
+    document.endpoint.host = host;
+    if (port) document.endpoint.port = Number(port);
+    if (maxConnections) document.endpoint.max_connections = Number(maxConnections);
+    if (typeof document.profile_uri === "string") document.profile_uri = path.resolve(path.dirname(source), document.profile_uri).replace(/\\/g, "/");
+    const directory = mkdtempSync(path.join(tmpdir(), "scada-bench-"));
+    const target = path.join(directory, path.basename(source));
+    writeFileSync(target, JSON.stringify(document, null, 2));
+    return target;
+}
+
+const required = benchTarget.external ? [providerExe, benchTarget.profile] : [providerExe, python, simulatorScript];
+export const benchAvailable = required.every((file) => existsSync(file));
+export const missingBench = required.filter((file) => !existsSync(file));
 
 export const BROKER_PORT = Number(process.env.SCADA_BENCH_BROKER_PORT ?? 3931);
 export const MODBUS_SLOT = "bench-motor01";
@@ -97,6 +152,7 @@ export class ModbusBench {
     }
 
     startSimulator(): void {
+        if (benchTarget.external) return;
         this._simulator = spawn(python, [simulatorScript, "--config", path.join(repoRoot, "test-bench", "simulator.json")], { stdio: "ignore" });
     }
 
@@ -116,7 +172,7 @@ export class ModbusBench {
                 "--slot",
                 MODBUS_SLOT,
                 "--config",
-                path.join(repoRoot, "test-bench", "motor01.profile.json"),
+                benchTarget.profile,
                 ...(this._options.providerToken ? ["--token", this._options.providerToken] : []),
             ],
             { stdio: "ignore" }

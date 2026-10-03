@@ -9,7 +9,7 @@ import { CALLER_META_KEY, brokerChannelOf } from "../../src/broker/broker.protoc
 import { ModbusScadaProvider } from "../../src/providers/modbus/modbus.scada.provider";
 import { ScadaService } from "../../src/scada.service";
 import { ScadaBehavior, brokerCallerResolver } from "../../src/server/scada.behavior";
-import { CountingSlotClient, MODBUS_SLOT, ModbusBench, benchAvailable, missingBench, slotClient, until } from "./bench";
+import { CountingSlotClient, MODBUS_SLOT, ModbusBench, benchAvailable, benchTarget, missingBench, slotClient, until } from "./bench";
 
 /**
  * mcp-scada in broker mode, against a real mcp-broker (its test kit) and the
@@ -70,7 +70,8 @@ async function rawCall(broker: ITestBroker, slot: string, caller: string, body: 
     return { status: answer.response.status, ...answer.body };
 }
 
-describe.skipIf(!benchAvailable)("SCADA v1 in broker mode, over the live mcp-modbus slot", () => {
+// These scenarios write the motor simulator's setpoints: not run against an external server.
+describe.skipIf(!benchAvailable || benchTarget.external)("SCADA v1 in broker mode, over the live mcp-modbus slot", () => {
     let broker: ITestBroker;
     let bench: ModbusBench;
     let modbusClient: McpClient;
