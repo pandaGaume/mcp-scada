@@ -31,10 +31,22 @@ class FakeOpcUaSlot implements ISlotClient {
     readback?: unknown;
     down = false;
 
+    readonly publications = new Map<string, string>();
+
     async callTool(name: string, args: Record<string, unknown>) {
         this.calls.push({ name, args });
         if (this.down) return text({ status: "error", code: "server_unavailable", error: 'Cannot connect to "plc"' });
         switch (name) {
+            case "opcua.publish_start": {
+                if (!((args.binding as string) in this.values)) return text({ status: "error", code: "unknown_binding", error: "not configured" });
+                if (!(args.topic as string).startsWith("production/")) return text({ status: "error", code: "not_permitted", error: "outside mqtt.allowedTopicRoots" });
+                const existing = [...this.publications].find(([, topic]) => topic === args.topic)?.[0];
+                const publicationId = existing ?? `pub-${this.publications.size + 1}`;
+                this.publications.set(publicationId, args.topic as string);
+                return text({ status: "ok", publicationId, created: !existing, topic: args.topic });
+            }
+            case "opcua.publish_stop":
+                return text({ status: "ok", stopped: this.publications.delete(args.publicationId as string) });
             case "opcua.read":
                 return text({
                     status: "ok",
@@ -164,7 +176,39 @@ describe("OpcUaScadaProvider", () => {
         expect(slot.calls[0].args).toMatchObject({ server: "plc", method: "motor01-start", arguments: {} });
 
         await expect(provider.invokeAsync({ id: `${ROOT}/plc/explode`, arguments: {} })).rejects.toBeInstanceOf(ScadaError);
-        await expect(provider.subscribeAsync()).rejects.toMatchObject({ code: "unsupported_capability" });
+    });
+
+    it("subscribes by publishing each id to its UNS topic on the MQTT data plane", async () => {
+        const { provider, slot } = create();
+        expect(provider.topicOf(SPEED)).toBe("production/site1/line1/plc/motor01-speed");
+
+        const first = await provider.subscribeAsync({ ids: [SPEED, SETPOINT], samplingMs: 250 });
+        expect(slot.calls).toEqual([
+            {
+                name: "opcua.publish_start",
+                args: { server: "plc", binding: "motor01-speed", topic: "production/site1/line1/plc/motor01-speed", id: SPEED, samplingIntervalMs: 250 },
+            },
+            {
+                name: "opcua.publish_start",
+                args: { server: "plc", binding: "motor01-speed-sp", topic: "production/site1/line1/plc/motor01-speed-sp", id: SETPOINT, samplingIntervalMs: 250 },
+            },
+        ]);
+
+        // A second subscription on the speed shares its publication: stopping the first keeps it alive.
+        const second = await provider.subscribeAsync({ ids: [SPEED] });
+        await provider.unsubscribeAsync(first.subscriptionId);
+        expect([...slot.publications.values()]).toEqual(["production/site1/line1/plc/motor01-speed"]);
+        await provider.unsubscribeAsync(second.subscriptionId);
+        expect(slot.publications.size).toBe(0);
+        expect(slot.calls.filter((c) => c.name === "opcua.publish_stop").every((c) => c.args.clearRetained === true)).toBe(true);
+    });
+
+    it("rolls a subscription back when one id is refused", async () => {
+        const { provider, slot } = create(undefined, { topicOf: (id) => (id === SETPOINT ? "elsewhere/sp" : `production/${id.split("/").pop()}`) });
+        await expect(provider.subscribeAsync({ ids: [SPEED, SETPOINT] })).rejects.toMatchObject({ code: "policy_denied", detail: { nativeCode: "not_permitted", id: SETPOINT } });
+        expect(slot.publications.size).toBe(0);
+        await expect(provider.subscribeAsync({ ids: [START] })).rejects.toMatchObject({ code: "unknown_resource" });
+        await expect(provider.subscribeAsync({ ids: [`${ROOT}/bad`] })).rejects.toMatchObject({ code: "unknown_resource" });
     });
 
     it("serves the SCADA contract through ScadaService and the broker policy", async () => {

@@ -42,7 +42,8 @@ cd ../mcp-opc-ua && dotnet build McpOpcUa.slnx
 ```
 
 The bench then starts the .NET OPC UA simulator (port 48431), an embedded
-broker (port 3932) and the `mcp-opc-ua` slot `opcua-line1`, connected with
+broker (port 3932), an embedded MQTT broker for the data plane (aedes, port
+18831) and the `mcp-opc-ua` slot `opcua-line1`, connected with
 SignAndEncrypt/Basic256Sha256 and the bench user. Override the locations with
 `MCP_OPCUA_DIR`, `MCP_OPCUA_SIMULATOR` and `MCP_OPCUA_SLOT`, the ports with
-`SCADA_OPCUA_SIMULATOR_PORT` and `SCADA_OPCUA_BROKER_PORT`.
+`SCADA_OPCUA_SIMULATOR_PORT`, `SCADA_OPCUA_BROKER_PORT` and `SCADA_OPCUA_MQTT_PORT`.

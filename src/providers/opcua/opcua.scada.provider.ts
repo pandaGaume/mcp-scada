@@ -11,6 +11,7 @@ import {
     type IScadaCapabilities,
     type IScadaErrorBody,
     type IScadaNode,
+    type ISubscribeRequest,
     type ISubscriptionHandle,
     type IWriteOutcome,
     type IWriteResult,
@@ -37,6 +38,12 @@ export interface IOpcUaScadaProviderOptions {
     readonly maxBatchSize?: number;
     /** Ask the slot to read every written value back and report a mismatch as a failure. */
     readonly verifyWrites?: boolean;
+    /**
+     * MQTT topic of a subscribed id on the data plane. Default: the UNS path
+     * without its scheme, `uns://plant/line1/x` -> `plant/line1/x`. It must sit
+     * under the slot's `mqtt.allowedTopicRoots`.
+     */
+    readonly topicOf?: (id: UnsId) => string;
 }
 
 interface IInventory {
@@ -65,6 +72,7 @@ interface IOpcUaResult {
     readonly statusCode?: string;
     readonly readback?: IOpcUaItem & { matches?: boolean };
     readonly namedOutputs?: Record<string, unknown>;
+    readonly publicationId?: string;
 }
 
 interface IOpcUaItem {
@@ -113,8 +121,10 @@ const UNAVAILABLE = new Set(["server_unavailable", "server_disabled", "timeout"]
  * - `sourceTimestamp` and `quality` come from the server; never synthesized;
  * - write and invoke go to bindings and methods the slot operator allowed;
  *   the slot re-checks its own engineering limits on top of the broker's;
- * - subscribe is not offered yet: the slot supports native resource
- *   subscriptions, but mcp-scada has no subscription path to route them.
+ * - subscribe is native and goes to the MQTT data plane, never over MCP:
+ *   each id becomes an `opcua.publish_start` on its topic, and the values
+ *   arrive as retained MQTT messages for any consumer to read. The provider
+ *   counts references, so subscriptions sharing an id share one publication.
  */
 export class OpcUaScadaProvider implements IScadaProvider {
     readonly id: string;
@@ -124,6 +134,12 @@ export class OpcUaScadaProvider implements IScadaProvider {
     private readonly _maxConcurrent: number;
     private readonly _maxBatch: number;
     private readonly _verifyWrites: boolean;
+    private readonly _topicOf: (id: UnsId) => string;
+    /** subscriptionId -> publication ids it holds. */
+    private readonly _subscriptions = new Map<string, string[]>();
+    /** publicationId -> number of subscriptions holding it. */
+    private readonly _references = new Map<string, number>();
+    private _nextSubscription = 1;
 
     constructor(options: IOpcUaScadaProviderOptions) {
         this.id = options.id;
@@ -133,6 +149,7 @@ export class OpcUaScadaProvider implements IScadaProvider {
         this._maxConcurrent = options.maxConcurrentAcquire ?? 4;
         this._maxBatch = options.maxBatchSize ?? 100;
         this._verifyWrites = options.verifyWrites ?? true;
+        this._topicOf = options.topicOf ?? ((id) => UnsPath.parse(id).segments.join("/"));
     }
 
     async getCapabilitiesAsync(): Promise<IScadaCapabilities> {
@@ -147,7 +164,7 @@ export class OpcUaScadaProvider implements IScadaProvider {
                 read: { destinations: ["source"], consistency: ["fresh", "max-age", "source"] },
                 write: { supported: true, destinations: ["source"] },
                 invoke: { supported: true },
-                subscribe: { supported: false },
+                subscribe: { supported: true, mode: "native" },
             },
             limits: { maxBatchSize: this._maxBatch, maxConcurrentAcquire: this._maxConcurrent },
             security: ["opcua"],
@@ -284,11 +301,67 @@ export class OpcUaScadaProvider implements IScadaProvider {
         return { id: request.id, status: "failure", nativeStatus: this._nativeStatus(result) };
     }
 
-    async subscribeAsync(): Promise<ISubscriptionHandle> {
-        throw new ScadaError("unsupported_capability", `opcua provider "${this.id}" does not route subscriptions yet`, { detail: { capability: "subscribe" } });
+    /** The MQTT topic a subscribed id is published to. */
+    topicOf(id: UnsId): string {
+        return this._topicOf(id);
     }
 
-    async unsubscribeAsync(): Promise<void> {}
+    /**
+     * Publishes every id to the MQTT data plane. All or nothing: if one id is
+     * refused, the publications this call created are stopped again.
+     */
+    async subscribeAsync(request: ISubscribeRequest): Promise<ISubscriptionHandle> {
+        const held: string[] = [];
+        try {
+            for (const id of request.ids) {
+                const key = this._keyOf(id);
+                if (!key) throw new ScadaError("unknown_resource", `${id} is not a <server>/<binding> id under ${this._root.id}`);
+                const result = await this._call("opcua.publish_start", {
+                    server: key.server,
+                    binding: key.name,
+                    topic: this._topicOf(id),
+                    id,
+                    ...(request.samplingMs !== undefined ? { samplingIntervalMs: request.samplingMs } : {}),
+                });
+                if (result.status !== "ok" || typeof result.publicationId !== "string") {
+                    const error = this._error(result);
+                    throw new ScadaError(error.code, error.message, { detail: { ...error.detail, id } });
+                }
+                held.push(result.publicationId);
+                this._references.set(result.publicationId, (this._references.get(result.publicationId) ?? 0) + 1);
+            }
+        } catch (error) {
+            await this._release(held);
+            throw error;
+        }
+        const subscriptionId = `${this.id}:sub-${this._nextSubscription++}`;
+        this._subscriptions.set(subscriptionId, held);
+        return { subscriptionId };
+    }
+
+    async unsubscribeAsync(subscriptionId: string): Promise<void> {
+        const held = this._subscriptions.get(subscriptionId);
+        if (!held) return;
+        this._subscriptions.delete(subscriptionId);
+        await this._release(held);
+    }
+
+    /** Drops one reference per publication; stops a publication when its last reference goes. */
+    private async _release(publications: readonly string[]): Promise<void> {
+        for (const publicationId of publications) {
+            const remaining = (this._references.get(publicationId) ?? 1) - 1;
+            if (remaining > 0) {
+                this._references.set(publicationId, remaining);
+                continue;
+            }
+            this._references.delete(publicationId);
+            try {
+                await this._call("opcua.publish_stop", { publicationId, clearRetained: true });
+            } catch {
+                // The slot being unreachable is not the caller's problem: its publications die with it.
+            }
+        }
+    }
 
     // ── Internals ───────────────────────────────────────────────────────────
 
