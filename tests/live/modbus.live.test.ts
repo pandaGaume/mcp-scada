@@ -183,7 +183,7 @@ describe.skipIf(!benchAvailable || benchTarget.external)("SCADA v1 over the live
     });
 
     it("reports a dead device as a native protocol error, not as a value", async () => {
-        bench.stopSimulator();
+        await bench.stopSimulator();
         const { items } = await service.readAsync(operator, { ids: [RUNNING], destination: "source" });
         expect(items[0]).toMatchObject({ error: { code: "native_protocol_error" } });
         // The last good value is still available, labelled as cached.
