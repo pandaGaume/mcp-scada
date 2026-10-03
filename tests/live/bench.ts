@@ -156,9 +156,17 @@ export class ModbusBench {
         this._simulator = spawn(python, [simulatorScript, "--config", path.join(repoRoot, "test-bench", "simulator.json")], { stdio: "ignore" });
     }
 
-    stopSimulator(): void {
-        this._simulator?.kill();
+    /**
+     * Stops the simulator and waits for its process to be gone: the provider keeps its connection
+     * open, so a request sent while the process is still exiting would still be answered.
+     */
+    async stopSimulator(): Promise<void> {
+        const simulator = this._simulator;
         this._simulator = undefined;
+        if (!simulator || simulator.exitCode !== null) return;
+        const exited = new Promise((resolve) => simulator.once("exit", resolve));
+        simulator.kill();
+        await exited;
     }
 
     startProvider(): void {
@@ -190,7 +198,7 @@ export class ModbusBench {
 
     async stop(): Promise<void> {
         await this.stopProvider();
-        this.stopSimulator();
+        await this.stopSimulator();
         await this.tunnel?.stop();
     }
 }
