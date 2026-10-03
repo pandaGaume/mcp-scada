@@ -16,6 +16,8 @@ export { ScadaService } from "./scada.service";
 export type { IApprovedResourceConfig, IReadRequest, IRequestContext, IScadaServiceOptions, IWriteRequest } from "./scada.service";
 export { ModbusScadaProvider } from "./providers/modbus/modbus.scada.provider";
 export type { IModbusScadaProviderOptions, ISlotClient } from "./providers/modbus/modbus.scada.provider";
+export { OpcUaScadaProvider } from "./providers/opcua/opcua.scada.provider";
+export type { IOpcUaScadaProviderOptions } from "./providers/opcua/opcua.scada.provider";
 export { ScadaBehavior, SCADA_CAPABILITIES_URI, brokerCallerResolver, serviceActorResolver } from "./server/scada.behavior";
 export type { ActorResolver, IScadaRequestContext } from "./server/scada.behavior";
 export * from "./broker/broker.protocol";

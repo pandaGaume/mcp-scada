@@ -31,3 +31,18 @@ A sibling checkout of `mcp-modbus` (or `MCP_MODBUS_DIR`) with:
 - the simulator virtual environment: run `tools/pymodbustcp/start.ps1` once there.
 
 Overrides: `MCP_MODBUS_PROVIDER`, `MCP_MODBUS_PYTHON`, `SCADA_BENCH_BROKER_PORT`. When a prerequisite is missing, the live suite is skipped and prints what it did not find.
+
+## OPC UA chain
+
+`tests/live/opcua.live.test.ts` drives the same contract over OPC UA. It needs a
+sibling [mcp-opc-ua](../../mcp-opc-ua) checkout, built once:
+
+```sh
+cd ../mcp-opc-ua && dotnet build McpOpcUa.slnx
+```
+
+The bench then starts the .NET OPC UA simulator (port 48431), an embedded
+broker (port 3932) and the `mcp-opc-ua` slot `opcua-line1`, connected with
+SignAndEncrypt/Basic256Sha256 and the bench user. Override the locations with
+`MCP_OPCUA_DIR`, `MCP_OPCUA_SIMULATOR` and `MCP_OPCUA_SLOT`, the ports with
+`SCADA_OPCUA_SIMULATOR_PORT` and `SCADA_OPCUA_BROKER_PORT`.
