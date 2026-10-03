@@ -4,14 +4,14 @@
 
 # mcp-scada
 
-SCADA v1 above the industrial MCP slots of an [mcp-broker](../mcp-broker): one contract for `browse`, `read`, `write` and `invoke`, whatever protocol a slot speaks (Modbus today, OPC UA next).
+SCADA v1 above the industrial MCP slots of an [mcp-broker](../mcp-broker): one contract for `browse`, `read`, `write` and `invoke`, whatever protocol a slot speaks (Modbus and OPC UA).
 
 ```text
 MCP client ──> mcp-broker ──> slot "scada" (mcp-scada)
                                   │  UNS resolution, capabilities, destination/consistency,
                                   │  broker policy decision, constraints, audit
                                   ├──> ModbusScadaProvider ──MCP──> slot "bench-motor01" (mcp-modbus, C++)
-                                  └──> (OpcUaScadaProvider)  ──MCP──> slot "opcua-line1"
+                                  └──> OpcUaScadaProvider    ──MCP──> slot "opcua-line1" (mcp-opc-ua, .NET)
 ```
 
 The invariant, from the [architecture brief](docs/brief_architecture_mcp_scada_v1.md):
@@ -32,7 +32,7 @@ mcp-scada configures the broker, the broker decides, mcp-scada applies: see [doc
 ### Broker mode (broker 1.5.0 and later)
 
 ```ts
-import { BrokerAuditReporter, BrokerDecisionClient, ModbusScadaProvider, ScadaBehavior, ScadaService, brokerCallerResolver } from "@cyanmycelium/mcp-scada";
+import { BrokerAuditReporter, BrokerDecisionClient, ModbusScadaProvider, OpcUaScadaProvider, ScadaBehavior, ScadaService, brokerCallerResolver } from "@cyanmycelium/mcp-scada";
 
 // `broker` is the provider's side channel: broker.declare / authorize / reportResult (mcp-broker-provider 0.3.0).
 const policy = new BrokerDecisionClient(broker);
@@ -46,6 +46,9 @@ await scada.registerProviderAsync(
     new ModbusScadaProvider({ id: "modbus-line1", client: modbusSlotClient, root: "uns://plant/line1", source: "device" }),
     "uns://plant/line1"
 );
+
+// OPC UA: ids are <root>/<server>/<binding> (variables) and <root>/<server>/<method> (methods).
+await scada.registerProviderAsync(new OpcUaScadaProvider({ id: "opcua-line1", client: opcuaSlotClient, root: "uns://plant" }), "uns://plant");
 
 // Descriptive only: namespace, capabilities, effects and limits, protected slots. No grant.
 await policy.declareAsync(scada.buildDeclaration({ version: "2026-10-01.1", namespace: "uns://plant", protects: ["modbus-line1"] }));
@@ -108,4 +111,13 @@ Conformance tests of the brief (section 13) against a simulated provider and the
 npm run test:live
 ```
 
-The same contract against the live Modbus chain: pyModbusTCP simulator, embedded broker, C++ `mcp_modbus_provider`. See [test-bench/README.md](test-bench/README.md).
+The same contract against the live chains: pyModbusTCP simulator, embedded broker and C++ `mcp_modbus_provider` for Modbus; the .NET OPC UA simulator and `mcp-opc-ua` slot of a sibling [mcp-opc-ua](../mcp-opc-ua) checkout (built with `dotnet build McpOpcUa.slnx`) for OPC UA. Each chain is skipped when its binaries are missing. See [test-bench/README.md](test-bench/README.md).
+
+### Providers
+
+| Provider | Slot | `source` | Read | Write / invoke | Timestamps |
+|---|---|---|---|---|---|
+| `ModbusScadaProvider` | mcp-modbus (C++) | `device` or `gateway` | live transaction | not yet | none, `sourceTimestamp: null` |
+| `OpcUaScadaProvider` | mcp-opc-ua (.NET) | `server` | `fresh`, `source`, `max-age` (OPC UA MaxAge) | bindings and methods the slot allows, write read back | from the server, with quality |
+
+An OPC UA client cannot know whether the server polled the device, so `OpcUaScadaProvider` declares `server`, never `device`; reads and writes target `source`.
