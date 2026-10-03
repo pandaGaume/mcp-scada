@@ -7,7 +7,7 @@ import { ModbusScadaProvider } from "../../src/providers/modbus/modbus.scada.pro
 import { ScadaService } from "../../src/scada.service";
 import { ScadaBehavior } from "../../src/server/scada.behavior";
 import { brokerAuth, observer, operator, stranger } from "../helpers";
-import { CountingSlotClient, MODBUS_SLOT, ModbusBench, benchAvailable, missingBench, slotClient, until } from "./bench";
+import { CountingSlotClient, MODBUS_SLOT, ModbusBench, benchAvailable, benchTarget, missingBench, slotClient, until } from "./bench";
 
 const ROOT = "uns://production/site1/line1";
 const MOTOR = `${ROOT}/motor01`;
@@ -18,7 +18,8 @@ const RUNNING = `${MOTOR}/running`;
 
 if (!benchAvailable) console.warn(`[scada live] skipped, missing: ${missingBench.join(", ")}`);
 
-describe.skipIf(!benchAvailable)("SCADA v1 over the live mcp-modbus slot", () => {
+// These scenarios write the motor simulator's setpoints: not run against an external server.
+describe.skipIf(!benchAvailable || benchTarget.external)("SCADA v1 over the live mcp-modbus slot", () => {
     const bench = new ModbusBench();
     let modbusClient: McpClient;
     let counting: CountingSlotClient;
