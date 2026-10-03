@@ -115,9 +115,11 @@ The same contract against the live chains: pyModbusTCP simulator, embedded broke
 
 ### Providers
 
-| Provider | Slot | `source` | Read | Write / invoke | Timestamps |
-|---|---|---|---|---|---|
-| `ModbusScadaProvider` | mcp-modbus (C++) | `device` or `gateway` | live transaction | not yet | none, `sourceTimestamp: null` |
-| `OpcUaScadaProvider` | mcp-opc-ua (.NET) | `server` | `fresh`, `source`, `max-age` (OPC UA MaxAge) | bindings and methods the slot allows, write read back | from the server, with quality |
+| Provider | Slot | `source` | Read | Write / invoke | Subscribe | Timestamps |
+|---|---|---|---|---|---|---|
+| `ModbusScadaProvider` | mcp-modbus (C++) | `device` or `gateway` | live transaction | not yet | no | none, `sourceTimestamp: null` |
+| `OpcUaScadaProvider` | mcp-opc-ua (.NET) | `server` | `fresh`, `source`, `max-age` (OPC UA MaxAge) | bindings and methods the slot allows, write read back | MQTT data plane | from the server, with quality |
 
 An OPC UA client cannot know whether the server polled the device, so `OpcUaScadaProvider` declares `server`, never `device`; reads and writes target `source`.
+
+Subscriptions do not travel over MCP. `OpcUaScadaProvider.subscribeAsync` asks the slot (`opcua.publish_start`) to publish each id to its UNS topic on the slot's MQTT broker: `uns://plant/line1/x` becomes the topic `plant/line1/x` (override with `topicOf`). Values arrive there as retained JSON messages carrying the UNS `id`, for any consumer. Subscriptions sharing an id share one publication; the last `unsubscribeAsync` stops it and clears the retained value.
