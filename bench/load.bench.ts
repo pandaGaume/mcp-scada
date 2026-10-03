@@ -31,7 +31,12 @@ const { device: DEVICE, bindings: BINDINGS } = benchTarget;
 const FIRST = `${ROOT}/${DEVICE}/${BINDINGS[0]}`;
 const IDS3 = BINDINGS.map((binding) => `${ROOT}/${DEVICE}/${binding}`);
 const SECONDS = Number(process.env.BENCH_SECONDS ?? 3);
-const CONCURRENCY = [1, 2, 4, 8];
+/** BENCH_CONCURRENCY: client counts to run, comma separated (default 1,2,4,8). */
+const CONCURRENCY = (process.env.BENCH_CONCURRENCY ?? "1,2,4,8").split(",").map(Number);
+/** BENCH_CELLS: which paths to measure, among A, B and C (default all). */
+const CELLS = new Set((process.env.BENCH_CELLS ?? "A,B,C").split(",").map((cell) => cell.trim().toUpperCase()));
+/** BENCH_ACQUIRE: the maxConcurrentAcquire values the B cells declare (default 1,4). */
+const ACQUIRE = (process.env.BENCH_ACQUIRE ?? "1,4").split(",").map(Number);
 /** A refused client waits this long before trying again, as a well-behaved one would, instead of hammering the broker. */
 const BACKOFF_MS = Number(process.env.BENCH_BACKOFF_MS ?? 25);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -150,12 +155,12 @@ afterAll(async () => {
 
 it("measures the chain under load", async () => {
     // A. The Modbus slot alone: what the C++ provider and the simulator sustain.
-    for (const n of CONCURRENCY) {
+    for (const n of CELLS.has("A") ? CONCURRENCY : []) {
         const sessions = await Promise.all(Array.from({ length: n }, () => connect(MODBUS_SLOT, "scada")));
         await measure("A modbus.read", sessions, (client) => client.callTool("modbus.read", { device: DEVICE, binding: BINDINGS[0], timeoutMs: 2_000 }));
     }
     // B. scada.read to the source, with the provider declaring 1 then 4 concurrent acquires.
-    for (const maxConcurrentAcquire of [1, 4]) {
+    for (const maxConcurrentAcquire of CELLS.has("B") ? ACQUIRE : []) {
         await publishScada(maxConcurrentAcquire);
         for (const ids of [[FIRST], IDS3]) {
             for (const n of CONCURRENCY) {
@@ -167,7 +172,8 @@ it("measures the chain under load", async () => {
         }
     }
     // C. scada.read from the local cache: no traffic to the equipment.
-    for (const n of CONCURRENCY) {
+    if (CELLS.has("C") && !CELLS.has("B")) await publishScada(ACQUIRE[ACQUIRE.length - 1]!);
+    for (const n of CELLS.has("C") ? CONCURRENCY : []) {
         const sessions = await Promise.all(Array.from({ length: n }, () => connect("scada", "operator")));
         await measure("C scada.read local, 3 id", sessions, (client) => client.callTool("scada.read", { ids: IDS3, destination: "local" }));
     }
