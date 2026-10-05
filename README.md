@@ -1,5 +1,8 @@
+[![mcp-broker: 1.6.0](docs/assets/mcp-broker-badge.svg)](https://github.com/pandaGaume/mcp-broker)
+
 <p align="center">
   <img src="docs/assets/mcp-scada-logo.png" alt="mcp-scada pixel art logo: a supervision screen with a panda, linked to a Modbus device and an OPC UA server" width="320">
+  <img src="docs/assets/mcp-broker-family.png" alt="MCP Broker Family" width="64" height="64" />
 </p>
 
 # mcp-scada
