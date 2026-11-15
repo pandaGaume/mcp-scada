@@ -10,6 +10,7 @@ import {
     type IBrokerObligations,
     type IDeclareParams,
     type IDeclareResult,
+    type IWithdrawResult,
 } from "../src/broker/broker.protocol";
 
 export interface IFakeBrokerOptions {
@@ -81,6 +82,15 @@ export class FakeBroker implements IBrokerChannel {
         if (problems.length) return { accepted: false, problems };
         this._declaration = params;
         return { accepted: true, version: params.version, policyVersion: `policy-${params.version}` };
+    }
+
+    /** E8: drops the declaration. A broker before E8 answers -32601, like any unknown `broker/*` method. */
+    async withdraw(): Promise<IWithdrawResult> {
+        if (this._options.mode === "unsupported") throw new BrokerRpcError(-32601, "Method not found: broker/authorization/withdraw");
+        const declaration = this._declaration;
+        this._declaration = undefined;
+        if (!declaration) return { withdrawn: false, domains: [] };
+        return { withdrawn: true, domain: declaration.domain, version: declaration.version, domains: [declaration.domain] };
     }
 
     async authorize(params: IAuthorizeParams): Promise<IAuthorizeResult> {

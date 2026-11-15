@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MemoryAuditSink } from "../src/audit/audit";
 import { BrokerAuditReporter } from "../src/broker/broker.audit.reporter";
 import { BrokerDecisionClient } from "../src/broker/broker.decision.client";
-import { CALLER_META_KEY, readCallerMeta, type IBrokerChannel } from "../src/broker/broker.protocol";
+import { CALLER_META_KEY, brokerChannelOf, readCallerMeta, type IBrokerChannel } from "../src/broker/broker.protocol";
 import { buildScadaDeclaration } from "../src/broker/declaration";
 import { isItemError, type IScadaValue } from "../src/contract/scada.types";
 import type { IScadaActor } from "../src/policy/policy.types";
@@ -85,6 +85,42 @@ describe("E1 declaration", () => {
         const read = await service.readAsync(callerFor(broker, ["group:operators"]), { ids: [SPEED], destination: "source" });
         expect(read.items[0]).toMatchObject({ error: { code: "authorization_unavailable" } });
         expect(provider.calls).toHaveLength(0);
+    });
+
+    it("E8: withdraws at shutdown, then serves nothing, without asking the broker or calling a provider", async () => {
+        const { broker, gate, service, provider } = await setup();
+        await declare(service, gate);
+        expect(await gate.withdrawAsync()).toMatchObject({ withdrawn: true, domain: "scada", domains: ["scada"] });
+        expect(gate.declaration.status).toBe("withdrawn");
+        const write = await service.writeAsync(callerFor(broker, ["group:operators"]), { items: [{ id: SETPOINT, value: 10 }], destination: "source" });
+        expect(write.items[0]).toMatchObject({ error: { code: "authorization_unavailable" } });
+        await expect(gate.evaluate({} as never)).rejects.toMatchObject({ message: expect.stringMatching(/withdrawn/) });
+        expect(broker.authorizeCalls).toHaveLength(0);
+        expect(provider.calls).toHaveLength(0);
+        // Idempotent.
+        expect(await gate.withdrawAsync()).toMatchObject({ withdrawn: false });
+    });
+
+    it("E8: never fails a shutdown, on a broker or a provider client without withdraw", async () => {
+        const older = await setup({ mode: "unsupported" });
+        await expect(older.gate.withdrawAsync()).resolves.toEqual({ withdrawn: false });
+        const noMethod: IBrokerChannel = { declare: async () => ({ accepted: true }), authorize: async () => ({ decisions: [] }) };
+        const gate = new BrokerDecisionClient(noMethod);
+        await gate.declareAsync({ version: "v", domain: "scada", namespace: { resource: "/p" }, capabilities: ["scada.observe"], resources: [], protects: [] });
+        await expect(gate.withdrawAsync()).resolves.toEqual({ withdrawn: false });
+        expect(gate.declaration.status).toBe("withdrawn");
+    });
+
+    it("E8: brokerChannelOf forwards withdraw only when the broker client offers it", async () => {
+        const base = { declare: async () => ({ accepted: true }), authorize: async () => ({ decisions: [] }) };
+        expect(brokerChannelOf(base).withdraw).toBeUndefined();
+        const channel = brokerChannelOf({
+            ...base,
+            withdraw: async () => {
+                throw Object.assign(new Error("Method not found"), { code: -32601 });
+            },
+        });
+        await expect(channel.withdraw!()).rejects.toMatchObject({ name: "BrokerRpcError", code: -32601 });
     });
 
     it("fails closed when the broker refuses the declaration, with its problems", async () => {
