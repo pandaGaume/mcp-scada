@@ -4,7 +4,7 @@ import type { Destination } from "../contract/scada.types";
 import { capabilityOf } from "../policy/operation.class";
 import type { IScadaConstraints, IScadaDecision, IScadaPolicyContext, IScadaPolicyGate } from "../policy/policy.types";
 import { UnsPath } from "@cyanmycelium/mcp-uns";
-import { BrokerRpcError, type IAuthorizeCheck, type IBrokerChannel, type IBrokerDecision, type IDeclareParams, type IDeclareResult } from "./broker.protocol";
+import { BrokerRpcError, type IAuthorizeCheck, type IBrokerChannel, type IBrokerDecision, type IDeclareParams, type IDeclareResult, type IWithdrawResult } from "./broker.protocol";
 
 export interface IBrokerDecisionClientOptions {
     /** Checks per `broker/authorize` request; larger batches are split. */
@@ -18,7 +18,10 @@ export interface IBrokerDecisionClientOptions {
 }
 
 type DeclarationState =
-    { readonly status: "pending" } | { readonly status: "accepted"; readonly result: IDeclareResult } | { readonly status: "refused"; readonly problems: readonly string[] };
+    | { readonly status: "pending" }
+    | { readonly status: "accepted"; readonly result: IDeclareResult }
+    | { readonly status: "refused"; readonly problems: readonly string[] }
+    | { readonly status: "withdrawn"; readonly result: IWithdrawResult };
 
 /**
  * mcp-scada's policy gate when the MCP Broker is the decision point.
@@ -66,6 +69,30 @@ export class BrokerDecisionClient implements IScadaPolicyGate {
         return result;
     }
 
+    /**
+     * Withdraws the SCADA declaration (E8), at a clean shutdown or before
+     * another mcp-scada identity takes the subtree over. From then on every
+     * question fails with `authorization_unavailable`, as before a declaration.
+     *
+     * Never throws: a shutdown must not fail because the broker is older (no
+     * `broker/authorization/withdraw`, `-32601`), the provider client cannot
+     * send it, or the socket is already gone. Those answer `withdrawn: false`,
+     * and the declaration then lasts until the broker restarts or an operator
+     * withdraws it with `broker_declaration_withdraw`.
+     */
+    async withdrawAsync(): Promise<IWithdrawResult> {
+        let result: IWithdrawResult = { withdrawn: false };
+        if (this._channel.withdraw) {
+            try {
+                result = (await this._channel.withdraw()) ?? { withdrawn: false };
+            } catch {
+                result = { withdrawn: false };
+            }
+        }
+        this._state = { status: "withdrawn", result };
+        return result;
+    }
+
     async evaluate(context: IScadaPolicyContext): Promise<IScadaDecision> {
         const [decision] = await this.evaluateMany([context]);
         return decision;
@@ -73,7 +100,12 @@ export class BrokerDecisionClient implements IScadaPolicyGate {
 
     async evaluateMany(contexts: readonly IScadaPolicyContext[]): Promise<readonly IScadaDecision[]> {
         if (this._state.status !== "accepted") {
-            const why = this._state.status === "refused" ? this._state.problems.join("; ") : "the declaration has not been accepted yet";
+            const why =
+                this._state.status === "refused"
+                    ? this._state.problems.join("; ")
+                    : this._state.status === "withdrawn"
+                      ? "the SCADA declaration was withdrawn"
+                      : "the declaration has not been accepted yet";
             throw new ScadaError("authorization_unavailable", `MCP Broker authorization is unavailable: ${why}`);
         }
 
