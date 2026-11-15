@@ -10,6 +10,7 @@
 
 export const BROKER_METHODS = {
     declare: "broker/authorization/declare",
+    withdraw: "broker/authorization/withdraw",
     authorize: "broker/authorize",
     auditResult: "broker/audit/result",
 } as const;
@@ -62,6 +63,19 @@ export interface IDeclareResult {
     readonly version?: string;
     readonly policyVersion?: string;
     readonly problems?: readonly string[];
+}
+
+// ── broker/authorization/withdraw (E8) ─────────────────────────────────────
+
+/** What `broker/authorization/withdraw` answers. It takes no parameter. */
+export interface IWithdrawResult {
+    /** `false` when the slot held nothing, or when the broker cannot withdraw (before E8). */
+    readonly withdrawn: boolean;
+    readonly domain?: string;
+    readonly version?: string;
+    /** Every domain whose subtree the slot no longer owns (broker with E7). */
+    readonly domains?: readonly string[];
+    readonly policyVersion?: string;
 }
 
 // ── broker/authorize ────────────────────────────────────────────────────────
@@ -137,6 +151,8 @@ export interface IBrokerChannel {
     authorize(params: IAuthorizeParams): Promise<IAuthorizeResult>;
     /** `broker/audit/result` (E5). Optional: a broker before it drops the notification with a warning. */
     reportResult?(params: IAuditResultParams): void;
+    /** `broker/authorization/withdraw` (E8). Optional: a provider client before it cannot send it. */
+    withdraw?(): Promise<IWithdrawResult>;
 }
 
 /** What `transport.broker` (mcp-broker-provider) and a loopback handle (`registerLoopbackProvider`) both offer. */
@@ -144,6 +160,8 @@ export interface IBrokerMethods {
     declare(declaration: IDeclareParams): Promise<unknown>;
     authorize(query: IAuthorizeParams): Promise<unknown>;
     reportResult?(report: IAuditResultParams): void;
+    /** mcp-broker-provider with E8, or a loopback handle of a broker with E8. */
+    withdraw?(): Promise<unknown>;
 }
 
 /**
@@ -166,6 +184,7 @@ export function brokerChannelOf(methods: IBrokerMethods): IBrokerChannel {
         declare: (params) => wrap<IDeclareResult>(() => methods.declare(params)),
         authorize: (params) => wrap<IAuthorizeResult>(() => methods.authorize(params)),
         ...(methods.reportResult ? { reportResult: (params: IAuditResultParams) => methods.reportResult!(params) } : {}),
+        ...(methods.withdraw ? { withdraw: () => wrap<IWithdrawResult>(() => methods.withdraw!()) } : {}),
     };
 }
 
